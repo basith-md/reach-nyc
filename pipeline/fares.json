@@ -1,0 +1,37 @@
+{
+  "_note": "Fares as of 2026-11-08. Sources listed per item. Amounts in USD.",
+  "mta": {
+    "base": 3.00, "weekly_cap": 35.00,
+    "express": 7.25, "express_weekly_cap": 67.00,
+    "free_transfer_window_min": 120,
+    "_src": "https://www.mta.info/press-release/mta-board-adopts-fare-and-toll-increases-take-effect-january-2026"
+  },
+  "rail_in_city": {
+    "cityticket_offpeak": 5.00, "cityticket_peak": 7.00,
+    "atlantic_ticket": 5.00, "atlantic_weekly": 60.00,
+    "peak_windows": [[360, 600], [960, 1200]],
+    "_src": "https://new2qa.mta.info/fares/lirr-metro-north ; https://nyc.streetsblog.org/2026/10/28/bright-lights-big-city-ticket-lirr-metronorth-ridership",
+    "_todo": "Replace with values extracted from the MTA fare PDF (pipeline/02_fares_pdf.py) when the PDF is available; mta.info blocks automated download."
+  },
+  "path": {
+    "single": 3.25, "pass_7day": 42.75, "pass_30day": 131.50,
+    "_src": "https://www.timeout.com/newyork/news/the-path-fare-hike-just-took-effect-itll-now-cost-you-3-25-to-take-the-train-to-new-jersey-050426"
+  },
+  "nyc_ferry": {
+    "single": 5.00, "ten_trip": 30.00, "free_transfer_window_min": 120,
+    "_src": "https://www.6sqft.com/nyc-ferry-fare-will-increase-to-5-this-month/"
+  },
+  "si_ferry": { "single": 0.0 },
+  "citibike": {
+    "nonmember_unlock": 4.99, "nonmember_included_classic_min": 30, "nonmember_per_min": 0.41,
+    "member_annual": 239.00, "member_included_classic_min": 45, "member_per_min": 0.27,
+    "member_manhattan_ebike_cap": 5.40, "member_manhattan_cap_max_min": 45,
+    "dock_overhead_s": 60,
+    "_src": "https://citibikenyc.com/pricechange2026"
+  },
+  "taxi_meter_fallback": {
+    "initial": 3.00, "per_fifth_mile": 0.70, "per_slow_min": 0.70,
+    "improvement": 1.00, "mta_tax": 0.50, "congestion_surcharge": 2.50, "cbd_fee": 0.75,
+    "_src": "https://www.nyc.gov/assets/tlc/downloads/pdf/Metered_Rates_of_Fare_Adopted_Rule_11_15_22.pdf"
+  }
+}

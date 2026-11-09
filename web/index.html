@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reach NYC</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div id="map"></div>
+
+  <header class="bar">
+    <div class="brand">
+      <div class="bullets" aria-hidden="true">
+        <span style="--c:#EE352E">R</span><span style="--c:#FF6319">E</span><span style="--c:#FCCC0A;--t:#111">A</span><span style="--c:#00933C">C</span><span style="--c:#0039A6">H</span>
+      </div>
+      <div class="titles">
+        <h1>How much does it cost to get around the city?</h1>
+        <p>Drop a pin. See everywhere you can reach in time, and what it costs.</p>
+      </div>
+    </div>
+    <div class="controls">
+      <label class="ctl big">
+        <span>Time budget</span>
+        <div class="stepper">
+          <button type="button" data-step="-5" aria-label="Less time">−</button>
+          <input id="mins" type="number" min="5" max="120" step="5" value="30" inputmode="numeric" />
+          <em>min</em>
+          <button type="button" data-step="5" aria-label="More time">+</button>
+        </div>
+      </label>
+      <label class="ctl">
+        <span>Trips / week</span>
+        <input id="tpw" type="number" min="1" max="21" step="1" value="5" inputmode="numeric" />
+      </label>
+      <label class="ctl">
+        <span>Day</span>
+        <select id="day">
+          <option value="wkd">Weekday</option>
+          <option value="sat">Saturday</option>
+          <option value="sun">Sunday</option>
+        </select>
+      </label>
+      <label class="ctl">
+        <span>Leave at</span>
+        <input id="time" type="time" value="08:30" step="900" />
+      </label>
+    </div>
+  </header>
+
+  <aside id="adv" class="panel collapsed">
+    <button id="advToggle" class="panel-head" type="button" aria-expanded="false">
+      <span>Advanced</span><i></i>
+    </button>
+    <div class="panel-body">
+      <div class="row"><label for="tipUber">Uber / Lyft tip</label><div class="unit"><input id="tipUber" type="number" min="0" max="50" value="0" /><em>%</em></div></div>
+      <div class="row"><label for="tipTaxi">Taxi tip</label><div class="unit"><input id="tipTaxi" type="number" min="0" max="50" value="0" /><em>%</em></div></div>
+      <div class="row"><label for="other">Other subway/bus rides / week<small>count toward the $35 OMNY cap</small></label><input id="other" type="number" min="0" max="40" value="0" /></div>
+      <div class="row"><label for="member">Citi Bike membership<small id="memberHint">No membership: $4.99 unlock per ride</small></label>
+        <select id="member">
+          <option value="nonmember" selected>None (pay per ride)</option>
+          <option value="annual">Annual, $239/yr (spread over your trips)</option>
+          <option value="member">Annual, already paid</option>
+        </select>
+      </div>
+      <div class="row check"><label for="docks">Show Citi Bike docks</label><input id="docks" type="checkbox" /></div>
+      <div class="row check"><label for="three">3D: height = cost</label><input id="three" type="checkbox" /></div>
+      <p class="fine">Fares as of Nov 2026: subway/bus $3 (OMNY cap $35/wk), express bus $7.25, PATH $3.25, NYC Ferry $5, CityTicket $5/$7. Citi Bike without membership: $4.99 unlock (classic includes 30 min, then $0.41/min; e-bike $4.99 + $0.41/min). Annual member ($239/yr): no unlock fee, classic includes 45 min, e-bike $0.27/min (capped at $5.40 for rides up to 45 min that start or end in Manhattan). Uber/Lyft &amp; taxi prices are medians of real NYC TLC trips (Jul–Sep 2026), before tips.</p>
+    </div>
+  </aside>
+
+  <section id="side" class="panel">
+    <div class="stat-head">
+      <span class="kicker" id="originName">Origin</span>
+      <div class="hero"><b id="areaTotal">—</b><span>km² reachable in <b id="minsEcho">30</b> min</span></div>
+    </div>
+    <div id="bandBar" class="bandbar" aria-hidden="true"></div>
+    <div class="legend-head"><span>Cheapest way there costs…</span><span>Area for this or less</span></div>
+    <ol id="legend" class="legend"></ol>
+    <div class="status" id="status">Loading map data…</div>
+  </section>
+
+  <nav id="modes" aria-label="Travel modes"></nav>
+
+  <div id="tip" class="tip" role="tooltip" hidden></div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
