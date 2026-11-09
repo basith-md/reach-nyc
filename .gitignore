@@ -1,0 +1,12 @@
+.venv/
+data/
+node_modules/
+web/public/data/
+web/dist/
+*.part
+__pycache__/
+scratch/
+web/test/prof/
+web/test/engine_test.mjs
+web/public/tiles/
+tools/
