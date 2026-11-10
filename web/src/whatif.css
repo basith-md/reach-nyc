@@ -1,0 +1,26 @@
+#leftcol { position: fixed; z-index: 9; left: 16px; top: 96px; width: 300px; display: flex; flex-direction: column; gap: 10px; max-height: calc(100vh - 200px); }
+#leftcol .panel { position: static; width: auto; overflow: hidden; }
+#leftcol .panel-body { max-height: calc(100vh - 330px); }
+#whatifPanel.collapsed .panel-body { display: none; }
+#whatifPanel.collapsed .panel-head i::after { content: "Show"; }
+#whatifPanel:not(.collapsed) .panel-head i::after { content: "Hide"; }
+.whatif { display: grid; gap: 8px; }
+.wi { display: grid; gap: 3px; font: 500 12px var(--body); }
+.wi > span { display: flex; justify-content: space-between; gap: 8px; }
+.wi b { font-variant-numeric: tabular-nums; }
+.wi input[type=range] { width: 100%; accent-color: #111; }
+.wi-reset { all: unset; cursor: pointer; justify-self: start; font: 600 12px var(--body); color: var(--ink-2); text-decoration: underline; }
+.whatif-badge { display: inline-block; margin-bottom: 8px; padding: 3px 8px; border-radius: 999px; background: #FCCC0A; color: #111; font: 700 10.5px var(--body); text-transform: uppercase; letter-spacing: .06em; }
+.tip .hypo { display: inline-block; margin-bottom: 6px; padding: 2px 7px; border-radius: 999px; background: #FCCC0A; font: 700 10px var(--body); text-transform: uppercase; letter-spacing: .06em; }
+@media (max-width: 900px) { #leftcol { top: 150px; width: calc(100vw - 32px); } }
+.wi-check { display: grid; grid-template-columns: 18px 1fr; gap: 8px; align-items: start; font: 500 12px var(--body); }
+.wi-check input { width: 16px; height: 16px; accent-color: #111; margin-top: 1px; }
+.wi-check small { display: block; color: var(--muted); font-size: 11px; }
+/* both columns scroll as a whole when their panels are taller than the screen */
+#leftcol { overflow-y: auto; padding-bottom: 4px; }
+#leftcol .panel-body { max-height: none; }
+#rightcol { position: fixed; z-index: 9; right: 16px; top: 96px; width: 300px; display: flex; flex-direction: column; gap: 10px; max-height: calc(100vh - 200px); overflow-y: auto; padding-bottom: 4px; }
+#rightcol .panel { position: static; width: auto; }
+#rightcol #adv .panel-body { max-height: none; }
+@media (max-width: 900px) { #rightcol { display: contents; } #rightcol .panel { position: fixed; } }
+#leftcol > .panel, #rightcol > .panel { flex-shrink: 0; }

@@ -1,0 +1,25 @@
+.about-btn { all: unset; cursor: pointer; margin-left: 6px; padding: 7px 12px; border-radius: 999px; background: #1c1c1c; color: #fff; font: 600 12.5px var(--body); white-space: nowrap; }
+.about-btn:hover { background: #333; }
+.about-btn:focus-visible { outline: 2px solid #FCCC0A; }
+.about-overlay { position: fixed; inset: 0; z-index: 50; background: rgba(11,11,11,.45); display: grid; place-items: center; padding: 16px; }
+.about-overlay[hidden] { display: none; }
+.about-card { width: min(760px, 100%); max-height: min(86vh, 900px); display: flex; flex-direction: column; background: var(--card); border-radius: 16px; box-shadow: var(--shadow); overflow: hidden; }
+.about-card header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; background: var(--sign); color: #fff; }
+.about-card h2 { margin: 0; font: 800 20px var(--body); }
+.about-close { all: unset; cursor: pointer; font: 600 13px var(--body); color: #ccc; }
+.about-close:hover, .about-close:focus-visible { color: #fff; text-decoration: underline; }
+.about-tabs { display: flex; gap: 4px; padding: 10px 16px 0; border-bottom: 1px solid var(--rule); overflow-x: auto; overflow-y: hidden; }
+/* header and tabs keep their full height; only the body scrolls */
+.about-card header, .about-tabs { flex-shrink: 0; }
+.about-body { flex: 1 1 auto; min-height: 0; }
+.about-tabs button { all: unset; cursor: pointer; padding: 8px 12px; font: 600 13px var(--body); color: var(--ink-2); border-bottom: 3px solid transparent; white-space: nowrap; }
+.about-tabs button[aria-selected=true] { color: var(--ink); border-bottom-color: #FCCC0A; }
+.about-body { padding: 4px 22px 22px; overflow: auto; font: 400 14px/1.6 var(--body); color: var(--ink); }
+.about-body h3 { margin: 18px 0 4px; font: 700 15px var(--body); }
+.about-body p { margin: 4px 0 8px; }
+.about-body ul { margin: 4px 0 8px; padding-left: 20px; }
+.about-body li { margin: 4px 0; }
+.about-body dl { margin: 12px 0 0; display: grid; grid-template-columns: minmax(150px, 34%) 1fr; gap: 8px 16px; }
+.about-body dt { font-weight: 700; }
+.about-body dd { margin: 0; color: var(--ink-2); }
+@media (max-width: 600px) { .about-body dl { grid-template-columns: 1fr; } .about-body dd { margin-bottom: 6px; } }

@@ -8,7 +8,8 @@ const WALK_MPS = 1.3;
 const MAX_ACCESS_WALK = 20 * 60;
 const MAX_DOCK_WALK = 10 * 60;
 const MAX_STOP_FROM_DOCK = 5 * 60;
-const MAX_BIKE_RIDE = 45 * 60;
+const MAX_BIKE_RIDE = 90 * 60;
+const SWAP_S = 60;            // dock the bike and take a fresh one (resets the included minutes)
 const DOCK_S = 30;            // time to lock a bike
 const MAX_FIRST_WAIT = 3600;  // window of departures considered
 const ROUNDS = 4;
@@ -21,7 +22,7 @@ const MTA_MASK = 3, IN_SYS = 4, FERRY_X = 8, BIKE_PAID = 16;
 
 type LegRec =
   | { k: 'walk'; secs: number }
-  | { k: 'bike'; type: 'classic' | 'ebike'; w1: number; ride: number; w2: number; d1: number; d2: number; fee: number }
+  | { k: 'bike'; type: 'classic' | 'ebike'; w1: number; ride: number; w2: number; d1: number; d2: number; fee: number; swaps?: number }
   | { k: 'ride'; p: number; trip: number; from: number; to: number }
   | { k: 'foot'; from: number; secs: number };
 
@@ -103,7 +104,17 @@ export class Engine {
   hourbin(p: Params) { const h = Math.floor(((p.depSec % 86400) + 86400) % 86400 / 3600); return (p.day === 'wkd' ? 0 : 24) + h; }
 
   fares(p: Params) {
-    const f = this.g.fares;
+    // base fares, with any "what if?" overrides from the Advanced panel
+    const b = this.g.fares, o = p.fareOverrides ?? {};
+    const f = {
+      ...b,
+      mta: { ...b.mta, base: o.mta ?? b.mta.base, weekly_cap: o.cap ?? b.mta.weekly_cap, express: o.express ?? b.mta.express },
+      nyc_ferry: { ...b.nyc_ferry, single: o.ferry ?? b.nyc_ferry.single, ten_trip: o.ferry != null ? b.nyc_ferry.ten_trip * o.ferry / b.nyc_ferry.single : b.nyc_ferry.ten_trip },
+      citibike: { ...b.citibike, nonmember_unlock: o.cbUnlock ?? b.citibike.nonmember_unlock, nonmember_classic: o.cbClassic ?? b.citibike.nonmember_unlock, nonmember_per_min: o.cbNonPerMin ?? b.citibike.nonmember_per_min,
+        member_per_min: o.cbMemPerMin ?? b.citibike.member_per_min, member_annual: o.cbAnnual ?? b.citibike.member_annual,
+        // What if? "no free minutes": unlock fees stay, every minute is charged
+        ...(o.cbNoFree ? { nonmember_included_classic_min: 0, member_included_classic_min: 0 } : {}) },
+    };
     const r = Math.max(1, p.tripsPerWeek) * (p.countReturn ? 2 : 1);
     const R = r + Math.max(0, p.otherRides);
     return {
@@ -119,16 +130,30 @@ export class Engine {
     };
   }
 
-  bikeFee(p: Params, F: ReturnType<Engine['fares']>, type: 'classic' | 'ebike', secs: number, manh: boolean, st: number): [number, number] {
+  /** Price of one bike leg -> [cost, state, dock swaps]. Classic rides may be split into k rides (k-1 dock swaps)
+   *  to reset the included minutes, whenever that is cheaper. E-bikes are per-minute, so swapping never helps. */
+  bikeFee(p: Params, F: ReturnType<Engine['fares']>, type: 'classic' | 'ebike', secs: number, manh: boolean, st: number): [number, number, number] {
     const cb = F.cb, mins = Math.max(1, Math.ceil(secs / 60));
-    const non = type === 'classic' ? cb.nonmember_unlock + Math.max(0, mins - cb.nonmember_included_classic_min) * cb.nonmember_per_min
-      : cb.nonmember_unlock + mins * cb.nonmember_per_min;
-    let mem = type === 'classic' ? Math.max(0, mins - cb.member_included_classic_min) * cb.member_per_min : mins * cb.member_per_min;
-    if (type === 'ebike' && manh && mins <= cb.member_manhattan_cap_max_min) mem = Math.min(mem, cb.member_manhattan_ebike_cap);
-    if (p.membership === 'nonmember') return [non, st];
-    if (p.membership === 'member') return [mem, st | BIKE_PAID];
-    const memTotal = mem + ((st & BIKE_PAID) ? 0 : F.amort);
-    return [memTotal, st | BIKE_PAID]; // 'annual': membership cost spread over this journey's weekly rides
+    const best = (price: number, incl: number, perMin: number) => {   // cheapest k rides for a classic leg
+      let bc = Infinity, bk = 1;
+      for (let k = 1; k <= (incl > 0 ? Math.max(1, Math.ceil(mins / incl)) : 1); k++) {
+        const c = k * price + Math.max(0, mins - k * incl) * perMin;
+        if (c < bc - 0.005) { bc = c; bk = k; }
+      }
+      return [bc, bk - 1] as const;
+    };
+    let non: number, nonSw = 0, mem: number, memSw = 0;
+    if (type === 'classic') {
+      [non, nonSw] = best(cb.nonmember_classic, cb.nonmember_included_classic_min, cb.nonmember_per_min);
+      [mem, memSw] = best(0, cb.member_included_classic_min, cb.member_per_min);
+    } else {
+      non = cb.nonmember_unlock + mins * cb.nonmember_per_min;
+      mem = mins * cb.member_per_min;
+      if (manh && mins <= cb.member_manhattan_cap_max_min) mem = Math.min(mem, cb.member_manhattan_ebike_cap);
+    }
+    if (p.membership === 'nonmember') return [non, st, nonSw];
+    if (p.membership === 'member') return [mem, st | BIKE_PAID, memSw];
+    return [mem + ((st & BIKE_PAID) ? 0 : F.amort), st | BIKE_PAID, memSw]; // 'annual': membership spread over weekly rides
   }
 
   async query(p: Params, tt: Timetable, id: number): Promise<QueryResult> {
@@ -150,7 +175,11 @@ export class Engine {
 
     // ---------- 2. Citi Bike directly from origin (per bike type), relative times
     const bikeTypes = (['classic', 'ebike'] as const).filter((b) => p.modes[b]);
-    const speedOf = (type: 'classic' | 'ebike') => g.bikeSpeed[type][hb];
+    // e-bike speed cap (What if?): today's data already reflects the 15 mph cap. Average speed responds only partly
+    // to the cap (lights, traffic), modelled as sqrt(cap / 15), and an e-bike is never slower than a classic bike.
+    const cap = p.fareOverrides?.ebikeCap;
+    const speedOf = (type: 'classic' | 'ebike') => type === 'ebike' && cap
+      ? Math.max(g.bikeSpeed.classic[hb], g.bikeSpeed.ebike[hb] * Math.sqrt(cap / 15)) : g.bikeSpeed[type][hb];
     const overhead = g.fares.citibike.dock_overhead_s;
     const directBike: Record<string, { arr: Float64Array; src: Int32Array; seedW: Float64Array } | undefined> = {};
     for (const type of bikeTypes) {
@@ -173,9 +202,9 @@ export class Engine {
           const j = g.egDock[t * g.KD + q]; if (j < 0) break;
           const dt = g.dockTile[j]; if (arr[dt] >= INF) continue;
           const sj = src[dt], ride = arr[dt] - (seedW[sj] + overhead);
-          const [fee] = this.bikeFee(p, F, type, ride, isManh(g.dockTile[sj]) || isManh(dt), 0);
+          const [fee, , swaps] = this.bikeFee(p, F, type, ride, isManh(g.dockTile[sj]) || isManh(dt), 0);
           const w2 = g.egDockS[t * g.KD + q];
-          put(t, { dur: arr[dt] + DOCK_S + w2, cost: fee, kind, ref: { k: 'bike', type, w1: seedW[sj], ride, w2, d1: sj, d2: j, fee } });
+          put(t, { dur: arr[dt] + DOCK_S + w2 + swaps * SWAP_S, cost: fee, kind, ref: { k: 'bike', type, w1: seedW[sj], ride, w2, d1: sj, d2: j, fee, swaps } });
         }
       }
     }
@@ -243,7 +272,8 @@ export class Engine {
     const fare = Math.max(m.floor[hb], (a + bm * miles + c * mins) * ratio);
     const tolls = (b[`${which}_tolls`] as Float32Array)[pair] || 0;
     const tip = fare * (which === 'hv' ? p.tipUber : p.tipTaxi) / 100;
-    const wait = which === 'hv' ? (p.includeFirstWait ? (b.hv_wait as Uint16Array)[zo * 48 + hb] : 0) : p.taxiWaitMin * 60;
+    // pickup wait: median Uber/Lyft request-to-arrival for this zone + hour (also used for hailing a cab)
+    const wait = (b.hv_wait as Uint16Array)[zo * 48 + hb] + p.taxiWaitMin * 60 * (which === 'taxi' ? 1 : 0);
     return { dur: mins * 60 + wait + walkA + walkB, price: fare + tip + tolls, fare, tip, tolls, wait, miles, mins, n, observed, walkA, walkB };
   }
 
@@ -259,10 +289,12 @@ export class Engine {
     const isManh = (t: number) => (g.flag[t] & 1) === 1;
     const routes = g.routes;
     const day = p.day;
+    const CMAX = (p.maxCost ?? Infinity) + 1e-9;
 
     const insert = (bags: (Label[] | undefined)[], s: number, l: Label, mk: number[]) => {
       const reachT = l.boarded ? l.arr - l.dep : l.arr - t0;
       if (reachT > H) return false;
+      if (l.cost > CMAX) return false;   // budget cap: costs only grow along a journey, so this prune is exact
       const b = (best[s] ??= []);
       if (!bagInsert(b, l)) return false;
       const rb = bags[s];
@@ -286,13 +318,13 @@ export class Engine {
       for (let j = 0; j < g.D; j++) {
         const dt = g.dockTile[j]; if (db.arr[dt] >= INF) continue;
         const sj = db.src[dt], ride = db.arr[dt] - (db.seedW[sj] + overhead);
-        const [fee, st] = this.bikeFee(p, F, type, ride, isManh(g.dockTile[sj]) || isManh(dt), 0);
+        const [fee, st, swaps] = this.bikeFee(p, F, type, ride, isManh(g.dockTile[sj]) || isManh(dt), 0);
         for (let q = 0; q < g.KS; q++) {
           const s = g.egStop[dt * g.KS + q]; if (s < 0) break;
           const w2 = g.egStopS[dt * g.KS + q]; if (w2 > MAX_STOP_FROM_DOCK) break;
-          const acc = db.arr[dt] + DOCK_S + w2;
+          const acc = db.arr[dt] + DOCK_S + w2 + swaps * SWAP_S;
           insert(prevBags, s, { arr: t0 + acc, cost: fee, dep: seedDep, acc, st, boarded: false, parent: null,
-            leg: { k: 'bike', type, w1: db.seedW[sj], ride, w2, d1: sj, d2: j, fee }, stop: s }, marked);
+            leg: { k: 'bike', type, w1: db.seedW[sj], ride, w2, d1: sj, d2: j, fee, swaps }, stop: s }, marked);
         }
       }
     }
@@ -413,12 +445,12 @@ export class Engine {
           const si = seedInfo[B.src[dt]];
           if (g.dockTile[si.dock] === dt) continue;
           const ride = B.dist[dt] - (si.l.arr + si.w1 + overhead);
-          const [fee, st0] = this.bikeFee(p, F, type, ride, isManh(g.dockTile[si.dock]) || isManh(dt), si.l.st);
+          const [fee, st0, swaps] = this.bikeFee(p, F, type, ride, isManh(g.dockTile[si.dock]) || isManh(dt), si.l.st);
           for (let q = 0; q < g.KS; q++) {
             const s = g.egStop[dt * g.KS + q]; if (s < 0) break;
             const w2 = g.egStopS[dt * g.KS + q]; if (w2 > MAX_STOP_FROM_DOCK) break;
-            insert(bags, s, { arr: B.dist[dt] + DOCK_S + w2, cost: si.l.cost + fee, dep: si.l.dep, pen: (si.l.pen ?? 0) + XFER_PEN, acc: 0, st: st0 & ~IN_SYS, boarded: true, parent: si.l,
-              leg: { k: 'bike', type, w1: si.w1, ride, w2, d1: si.dock, d2: j, fee }, stop: s }, nextMarked);
+            insert(bags, s, { arr: B.dist[dt] + DOCK_S + w2 + swaps * SWAP_S, cost: si.l.cost + fee, dep: si.l.dep, pen: (si.l.pen ?? 0) + XFER_PEN, acc: 0, st: st0 & ~IN_SYS, boarded: true, parent: si.l,
+              leg: { k: 'bike', type, w1: si.w1, ride, w2, d1: si.dock, d2: j, fee, swaps }, stop: s }, nextMarked);
           }
         }
       }
@@ -479,10 +511,10 @@ export class Engine {
           if (g.dockTile[si.dock] === dt) continue;
           const ride = B.dist[dt] - si.t0;
           const l = si.o.ref as Label;
-          const [fee] = this.bikeFee(p, F, type, ride, isManh(g.dockTile[si.dock]) || isManh(dt), l.st);
+          const [fee, , swaps] = this.bikeFee(p, F, type, ride, isManh(g.dockTile[si.dock]) || isManh(dt), l.st);
           const w2 = g.egDockS[t * g.KD + q];
-          put(t, { dur: B.dist[dt] + DOCK_S + w2, cost: si.o.cost + fee, kind: K_TRANSIT,
-            ref: { l, egress: { k: 'bike', type, w1: si.w1, ride, w2, d1: si.dock, d2: j, fee } } });
+          put(t, { dur: B.dist[dt] + DOCK_S + w2 + swaps * SWAP_S, cost: si.o.cost + fee, kind: K_TRANSIT,
+            ref: { l, egress: { k: 'bike', type, w1: si.w1, ride, w2, d1: si.dock, d2: j, fee, swaps } } });
         }
       }
     }
@@ -505,9 +537,12 @@ export class Engine {
     const o = list[idx], g = this.g, tt = L.tt, p = L.p;
     const zone = g.ride.zones.name[g.zone[tile]] || '';
     const legs: Leg[] = [];
+    const real = { ...p, fareOverrides: {} }, hypo = Object.keys(p.fareOverrides ?? {}).length > 0;
     const bikeLegs = (b: any): Leg[] => [
       { mode: 'walk', name: 'Walk to dock', color: '', secs: b.w1, to: g.dockName[b.d1] },
-      { mode: b.type, name: b.type === 'ebike' ? 'Citi Bike e-bike' : 'Citi Bike classic', color: '', secs: b.ride + DOCK_S, cost: b.fee, from: g.dockName[b.d1], to: g.dockName[b.d2] },
+      { mode: b.type, name: b.type === 'ebike' ? 'Citi Bike e-bike' : 'Citi Bike classic', color: '', secs: b.ride + DOCK_S + (b.swaps ?? 0) * SWAP_S, cost: b.fee, from: g.dockName[b.d1], to: g.dockName[b.d2],
+        note: [b.swaps ? `${b.swaps + 1} rides: dock and take a fresh bike ${b.swaps === 1 ? 'once' : b.swaps + ' times'} to reset the included minutes` : '',
+          hypo ? `real price $${this.bikeFee(real, this.fares(real), b.type, b.ride, false, 0)[0].toFixed(2)}` : ''].filter(Boolean).join(' · ') || undefined },
       { mode: 'walk', name: 'Walk', color: '', secs: b.w2 },
     ];
     if (o.kind === K_WALK) legs.push({ mode: 'walk', name: 'Walk', color: '', secs: o.dur });

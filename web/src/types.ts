@@ -7,6 +7,7 @@ export interface Params {
   day: Day;
   depSec: number;
   horizonMin: number;
+  maxCost?: number;          // optional budget cap ($): the engine drops partial journeys costing more
   tripsPerWeek: number;
   countReturn: boolean;
   otherRides: number;
@@ -15,6 +16,8 @@ export interface Params {
   taxiWaitMin: number;
   includeFirstWait: boolean;
   membership: Membership;
+  /** hypothetical fares (Advanced → What if?): mta, cap, express, ferry, cbUnlock, cbNonPerMin, cbMemPerMin, cbAnnual */
+  fareOverrides?: Record<string, number>;
   modes: Record<ModeKey, boolean>;
 }
 
