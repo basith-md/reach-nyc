@@ -62,6 +62,7 @@ const main = async () => {
         ex.legs.map((l) => `${l.mode}:${l.name}${l.cost ? '($' + l.cost.toFixed(2) + ')' : ''} ${(l.secs / 60).toFixed(0)}m`).join(' > '));
     });
   };
+  console.log('bike fee, no membership, 4-min ride: classic', e.bikeFee(base, e.fares(base), 'classic', 240, false, 0)[0], 'e-bike', e.bikeFee(base, e.fares(base), 'ebike', 240, false, 0)[0]);
   show(40.6925, -73.9903, 'Downtown Brooklyn (Borough Hall)');
   show(40.7527, -73.9772, 'Grand Central');
   show(40.7282, -73.9942, 'NoHo');

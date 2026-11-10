@@ -23,12 +23,13 @@
     </div>
     <div class="controls">
       <label class="ctl big">
-        <span>Time budget</span>
+        <span class="bhead"><span class="seg budget-sw" role="group" aria-label="Budget type"><button type="button" data-b="time" aria-pressed="true">Time</button><button type="button" data-b="money" aria-pressed="false">Money</button></span><span id="budgetLab">budget</span></span>
         <div class="stepper">
-          <button type="button" data-step="-5" aria-label="Less time">−</button>
-          <input id="mins" type="number" min="5" max="120" step="5" value="30" inputmode="numeric" />
-          <em>min</em>
-          <button type="button" data-step="5" aria-label="More time">+</button>
+          <button type="button" data-step="-1" aria-label="Less">−</button>
+          <em id="budgetPre" class="pre" hidden>$</em>
+          <input id="mins" type="number" min="5" max="120" step="5" value="30" inputmode="decimal" />
+          <em id="budgetUnit">min</em>
+          <button type="button" data-step="1" aria-label="More">+</button>
         </div>
       </label>
       <label class="ctl">
@@ -74,10 +75,10 @@
   <section id="side" class="panel">
     <div class="stat-head">
       <span class="kicker" id="originName">Origin</span>
-      <div class="hero"><b id="areaTotal">—</b><span>km² reachable in <b id="minsEcho">30</b> min</span></div>
+      <div class="hero"><b id="areaTotal">—</b><span id="heroSub">km² reachable in <b id="minsEcho">30</b> min</span></div>
     </div>
     <div id="bandBar" class="bandbar" aria-hidden="true"></div>
-    <div class="legend-head"><span>Cheapest way there costs…</span><span>Area for this or less</span></div>
+    <div class="legend-head"><span id="legendHead">Cheapest way there costs…</span><span>Area for this or less</span></div>
     <ol id="legend" class="legend"></ol>
     <div class="status" id="status">Loading map data…</div>
   </section>

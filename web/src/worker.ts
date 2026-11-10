@@ -26,6 +26,20 @@ self.onmessage = async (ev: MessageEvent) => {
     const tt = await loadTimetable(ttDay, g!.S);
     const res = await engine!.query(p, tt, msg.id);
     postMessage({ type: 'result', res }, [res.off.buffer, res.dur.buffer, res.cost.buffer, res.kind.buffer] as any);
+  } else if (msg.type === 'sim') {
+    // simulation: one origin, using the exact settings snapshot from the UI; return km² reachable within T for <= D
+    const p: Params = { ...msg.params, origin: msg.origin };
+    const ttDay = p.depSec < 4 * 3600 ? prevDay[p.day] : p.day;
+    const tt = await loadTimetable(ttDay, g!.S);
+    const res = await engine!.query(p, tt, 0);
+    const lim = msg.T * 60, D = msg.D + 1e-9;
+    // area (km2) of hexagons reachable within T minutes for <= $D
+    let n = 0;
+    for (let t = 0; t < res.n; t++) {
+      for (let i = res.off[t]; i < res.off[t + 1]; i++) if (res.dur[i] <= lim && res.cost[i] <= D) { n++; break; }
+    }
+    engine!.last = null; // free memory between origins
+    postMessage({ type: 'simres', job: msg.job, origin: msg.origin, km2: n * 0.0150475, ms: res.ms });
   } else if (msg.type === 'explain') {
     const ex = engine!.explain(msg.tile, msg.idx);
     const alt = msg.alts ? (msg.alts as number[]).map((i) => engine!.explain(msg.tile, i)) : [];

@@ -8,10 +8,18 @@ import { DataFilterExtension } from '@deck.gl/extensions';
 import { latLngToCell, gridDisk } from 'h3-js';
 import type { Explain, Leg, ModeKey, Params, QueryResult } from './types';
 import { K_CLASSIC, K_EBIKE, K_TAXI, K_TRANSIT, K_UBER, K_WALK } from './types';
+import { setupWhatif } from './whatif';
+import { setupAbout } from './about';
+import { setupSim } from './sim';
 
 // ------------------------------------------------------------------ cost bands (sequential: pale -> dark)
 const BANDS = [
-  { max: 0.001, label: '$0', sub: 'walking', color: '#FFF1A8' },
+  // below a subway fare: green scale (pale -> deep)
+  { max: 0.001, label: '$0', sub: 'walking', color: '#E2F3E6' },
+  { max: 1, label: 'up to $1', sub: '', color: '#A9DDB6' },
+  { max: 2, label: 'up to $2', sub: '', color: '#5FBC7C' },
+  { max: 2.995, label: 'under $3', sub: 'cheaper than a subway fare', color: '#1B8A4C' },
+  // a fare and above: yellow -> red -> dark
   { max: 3.25, label: 'up to $3.25', sub: 'one fare', color: '#FCCC0A' },
   { max: 6, label: 'up to $6', sub: 'two fares, or a bike ride', color: '#FF9E1B' },
   { max: 10, label: 'up to $10', sub: '', color: '#FF6319' },
@@ -23,6 +31,18 @@ const hexRGB = (h: string) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 
 const BAND_RGB = BANDS.map((b) => hexRGB(b.color));
 const bandOf = (c: number) => { for (let i = 0; i < BANDS.length; i++) if (c <= BANDS[i].max) return i; return BANDS.length - 1; };
 const TILE_KM2 = 0.0150475; // H3 res-10 average
+// money-budget mode: colour by the fastest trip that fits the budget (green = quick, red = slow)
+let moneyH = 60;           // longest trip considered in money mode (minutes); set from the Simulation panel
+const TBANDS = [
+  { max: 10, label: 'under 10 min', color: '#1B8A4C' },
+  { max: 15, label: '10–15 min', color: '#5FBC7C' },
+  { max: 20, label: '15–20 min', color: '#FCCC0A' },
+  { max: 30, label: '20–30 min', color: '#FF9E1B' },
+  { max: 45, label: '30–45 min', color: '#EE352E' },
+  { max: Infinity, label: '45 min or more', color: '#A51C30' },
+];
+const TBAND_RGB = TBANDS.map((b) => hexRGB(b.color));
+const tbandOf = (m: number) => { for (let i = 0; i < TBANDS.length; i++) if (m <= TBANDS[i].max) return i; return TBANDS.length - 1; };
 
 // ------------------------------------------------------------------ modes (categorical identity: official line colours)
 const MODES: { key: ModeKey; label: string; b: string; c: string; t?: string }[] = [
@@ -43,7 +63,7 @@ const MODE_STYLE: Record<string, { c: string; t?: string; b: string }> = {
   path: { c: '#004D6F', b: 'P' }, ferry: { c: '#00A1DE', b: 'F' }, free: { c: '#00A1DE', b: 'F' },
   classic: { c: '#0070C0', b: 'CB' }, ebike: { c: '#00B2E3', b: 'E' }, uber: { c: '#111', b: 'U' }, taxi: { c: '#FCCC0A', t: '#111', b: 'T' },
 };
-const KIND_NAME = ['Walk', 'Citi Bike', 'E-bike', 'Transit', 'Uber / Lyft', 'Taxi'];
+const KIND_NAME = ['Walk', 'Citi Bike classic', 'Citi Bike e-bike', 'Transit', 'Uber / Lyft', 'Taxi'];
 
 // ------------------------------------------------------------------ state
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -53,6 +73,9 @@ const params: Params = {
   modes: { subway: true, bus: true, express: true, rail: true, path: true, ferry: true, classic: true, ebike: true, uber: true, taxi: true },
 };
 let T = 30;                 // display budget (minutes)
+let M = 5;                  // money budget ($), used when budgetMode === 'money'
+let budgetMode: 'time' | 'money' = 'time';
+const lim = () => (budgetMode === 'time' ? T : moneyH);   // time limit shown on the map (minutes)
 let N = 0;
 let h3ids: string[] = [];
 let h3index = new Map<string, number>();
@@ -65,6 +88,9 @@ let version = 0;
 let animT = 0, animStart = 0, animFrom = 0, animTo = 0, animating = false;
 let outline: number[][][] = [];
 let show3D = false, showDocks = false;
+let border: number[][][] = [];
+let simActive = false, simLayers: any[] = [];   // connectivity simulation view
+fetch('/data/nyc_boundary.geojson').then((r) => r.json()).then((g) => { border = g.features[0].geometry.coordinates; if (result) render(); });
 const tileIdx: number[] = [];
 
 // ------------------------------------------------------------------ worker
@@ -102,6 +128,23 @@ map.on('style.load', () => {
   }
 });
 
+// toggle: hide roads, labels and buildings so the coloured hexagons read clearly
+const baseBtn = document.createElement('button');
+baseBtn.id = 'baseToggle'; baseBtn.type = 'button'; baseBtn.textContent = 'Hide roads & labels'; baseBtn.setAttribute('aria-pressed', 'false');
+document.body.appendChild(baseBtn);
+let plainMap = false;
+const wasHidden = new Set<string>();
+baseBtn.addEventListener('click', () => {
+  plainMap = !plainMap;
+  for (const l of map.getStyle().layers) {
+    if (!(l.type === 'line' || l.type === 'symbol' || l.id.startsWith('building'))) continue;
+    if (plainMap) { if (map.getLayoutProperty(l.id, 'visibility') === 'none') wasHidden.add(l.id); map.setLayoutProperty(l.id, 'visibility', 'none'); }
+    else if (!wasHidden.has(l.id)) map.setLayoutProperty(l.id, 'visibility', 'visible');
+  }
+  baseBtn.textContent = plainMap ? 'Show roads & labels' : 'Hide roads & labels';
+  baseBtn.setAttribute('aria-pressed', String(plainMap));
+});
+
 const pinEl = document.createElement('div');
 pinEl.className = 'pin';
 const pin = new maplibregl.Marker({ element: pinEl, draggable: true }).setLngLat([-73.9855, 40.758]);
@@ -133,6 +176,8 @@ function setOrigin(lat: number, lng: number) {
   const t = nearestTile(lat, lng);
   if (t < 0) { status('That spot is outside the five boroughs, or on water. Try somewhere else.'); return; }
   params.origin = t;
+  // clear the old reach right away so the new pin visibly takes over while it computes
+  if (result) { fastestMin.fill(1e6); version++; outline = []; tip.hidden = true; hoverTile = -1; render(); }
   runQuery(true);
 }
 
@@ -141,7 +186,8 @@ function runQuery(immediate = false) {
   if (params.origin < 0) return;
   clearTimeout(queryTimer);
   queryTimer = window.setTimeout(() => {
-    params.horizonMin = Math.max(T, 15);
+    params.horizonMin = Math.max(lim(), 15);
+    params.maxCost = budgetMode === 'money' ? M : undefined;   // money mode: prune journeys over budget (much faster)
     latestQ = ++qid;
     pinEl.classList.add('busy');
     status('Finding every route…');
@@ -156,16 +202,23 @@ function onResult(res: QueryResult) {
   recompute(true);
 }
 
-/** Reduce per-tile option lists to "cheapest within T" and "fastest". */
+/** Time mode: per tile, cheapest option within T (+ fastest overall, for the reveal animation).
+ *  Money mode: per tile, fastest option costing <= M (cheapCost/cheapIdx then hold that option). */
 function recompute(animate: boolean) {
   if (!result) return;
   const { off, dur, cost } = result;
-  const lim = T * 60;
+  const L = lim(), limS = L * 60, money = budgetMode === 'money', Mx = M + 1e-9;
   for (let t = 0; t < N; t++) {
     let f = 1e6, c = Infinity, ci = -1;
-    for (let i = off[t]; i < off[t + 1]; i++) {
-      if (dur[i] / 60 < f) f = dur[i] / 60;
-      if (dur[i] <= lim && cost[i] < c) { c = cost[i]; ci = i - off[t]; }
+    if (!money) {
+      for (let i = off[t]; i < off[t + 1]; i++) {
+        if (dur[i] / 60 < f) f = dur[i] / 60;
+        if (dur[i] <= limS && cost[i] < c) { c = cost[i]; ci = i - off[t]; }
+      }
+    } else {
+      let bd = Infinity;
+      for (let i = off[t]; i < off[t + 1]; i++) if (cost[i] <= Mx && dur[i] <= limS && dur[i] < bd) { bd = dur[i]; c = cost[i]; ci = i - off[t]; }
+      f = bd / 60;
     }
     fastestMin[t] = ci >= 0 ? f : 1e6;
     cheapCost[t] = c; cheapIdx[t] = ci;
@@ -173,8 +226,8 @@ function recompute(animate: boolean) {
   version++;
   updateStats();
   requestOutline();
-  if (animate) { animFrom = 0; animTo = T; startAnim(); }
-  else { if (animT < T) { animFrom = animT; animTo = T; startAnim(); } else { animT = T; render(); } }
+  if (animate) { animFrom = 0; animTo = L; startAnim(); }
+  else { if (animT < L) { animFrom = animT; animTo = L; startAnim(); } else { animT = L; render(); } }
 }
 
 function startAnim() {
@@ -195,7 +248,7 @@ function requestOutline() {
   clearTimeout(outlineTimer);
   outlineTimer = window.setTimeout(() => {
     const tiles: number[] = [];
-    for (let t = 0; t < N; t++) if (fastestMin[t] <= T) tiles.push(t);
+    for (let t = 0; t < N; t++) if (fastestMin[t] <= lim()) tiles.push(t);
     latestO = ++oid;
     worker.postMessage({ type: 'outline', id: latestO, tiles });
   }, 150);
@@ -208,7 +261,7 @@ function render() {
       beforeId: 'highway_path',
       highPrecision: false, coverage: 1, stroked: false, filled: true,
       extruded: show3D, elevationScale: 1, getElevation: (i: number) => (isFinite(cheapCost[i]) ? 30 + cheapCost[i] * 45 : 0),
-      getFillColor: (i: number) => { const c = BAND_RGB[bandOf(cheapCost[i])]; return [c[0], c[1], c[2], show3D ? 235 : 190]; },
+      getFillColor: (i: number) => { const c = budgetMode === 'money' ? TBAND_RGB[tbandOf(fastestMin[i])] : BAND_RGB[bandOf(cheapCost[i])]; return [c[0], c[1], c[2], show3D ? 235 : 190]; },
       pickable: true, autoHighlight: true, highlightColor: [17, 17, 17, 90],
       extensions: [new DataFilterExtension({ filterSize: 1 })],
       getFilterValue: (i: number) => fastestMin[i],
@@ -232,24 +285,35 @@ function render() {
       lineWidthUnits: 'pixels', getLineWidth: 1, beforeId: 'waterway_line_label',
     } as any));
   }
+  if (simActive) { layers.length = 0; layers.push(...simLayers); }   // simulation heatmap replaces the single-pin view
+  if (border.length) {
+    // the city limit: white halo + bold ink line, above the hexagons, below labels
+    for (const [id, color, width] of [['border-halo', [255, 255, 255, 220], 6], ['border', [17, 17, 17, 255], 2.5]] as const) {
+      layers.push(new PathLayer({ id, data: border, getPath: (d: any) => d, getColor: color as any, getWidth: width, widthUnits: 'pixels',
+        jointRounded: true, capRounded: true, beforeId: 'waterway_line_label' } as any));
+    }
+  }
   overlay.setProps({ layers });
 }
 
 // ------------------------------------------------------------------ stats + legend
 function updateStats() {
-  const counts = new Array(BANDS.length).fill(0);
+  const money = budgetMode === 'money';
+  const bands: { label: string; sub?: string; color: string }[] = money ? TBANDS : BANDS;
+  const counts = new Array(bands.length).fill(0);
   let total = 0;
-  for (let t = 0; t < N; t++) if (fastestMin[t] <= T) { counts[bandOf(cheapCost[t])]++; total++; }
+  for (let t = 0; t < N; t++) if (fastestMin[t] <= lim()) { counts[money ? tbandOf(fastestMin[t]) : bandOf(cheapCost[t])]++; total++; }
   $('areaTotal').textContent = (total * TILE_KM2).toFixed(1);
-  $('minsEcho').textContent = String(T);
+  $('heroSub').innerHTML = money ? `km² reachable for <b>$${M.toFixed(2)}</b> <small style="color:var(--muted)">(trips up to ${moneyH} min)</small>` : `km² reachable in <b>${T}</b> min`;
+  $('legendHead').textContent = money ? 'Fastest way there takes…' : 'Cheapest way there costs…';
   const bar = $('bandBar');
-  bar.innerHTML = BANDS.map((b, i) => `<i style="background:${b.color};flex-grow:${counts[i]}"></i>`).join('');
+  bar.innerHTML = bands.map((b, i) => `<i style="background:${b.color};flex-grow:${counts[i]}"></i>`).join('');
   let cum = 0;
-  $('legend').innerHTML = BANDS.map((b, i) => {
+  $('legend').innerHTML = bands.map((b, i) => {
     cum += counts[i];
     return `<li class="${counts[i] ? '' : 'dim'}"><span class="sw" style="--c:${b.color}"></span>
       <span><b>${b.label}</b>${b.sub ? ` <span style="color:var(--muted)">· ${b.sub}</span>` : ""}</span>
-      <span class="km" title="cumulative area you can reach for this much or less">${(cum * TILE_KM2).toFixed(1)} km²</span></li>`;
+      <span class="km" title="cumulative area you can reach this ${money ? 'fast' : 'cheaply'} or better">${(cum * TILE_KM2).toFixed(1)} km²</span></li>`;
   }).join('');
   const o = params.origin;
   if (o >= 0) {
@@ -270,7 +334,7 @@ let hoverTile = -1, mouse = { x: 0, y: 0 };
 function onHover(info: any) {
   const t = info.index ?? -1;
   if (info.x !== undefined) mouse = { x: info.x, y: info.y };
-  if (t < 0 || !result || fastestMin[t] > animT || fastestMin[t] > T) { hoverTile = -1; tip.hidden = true; return; }
+  if (t < 0 || !result || simActive || fastestMin[t] > animT || fastestMin[t] > lim()) { hoverTile = -1; tip.hidden = true; return; }
   positionTip();
   if (t === hoverTile) return;
   hoverTile = t;
@@ -284,6 +348,12 @@ function onHover(info: any) {
     let bi = -1;
     for (let i = off[t]; i < off[t + 1]; i++) if (kind[i] === k && (bi < 0 || cost[i] < cost[bi])) bi = i;
     if (bi >= 0) alts.push(bi - off[t]);
+  }
+  if (budgetMode === 'money') {
+    // money mode: also the cheapest option within the trip-length limit (always the last alt)
+    let ci = -1;
+    for (let i = off[t]; i < off[t + 1]; i++) if (dur[i] <= moneyH * 60 && (ci < 0 || cost[i] < cost[ci] || (cost[i] === cost[ci] && dur[i] < dur[ci]))) ci = i;
+    alts.push(ci - off[t]);
   }
   latestE = ++eid;
   worker.postMessage({ type: 'explain', id: latestE, tile: t, idx: cheapIdx[t], alts });
@@ -309,6 +379,7 @@ function legHTML(l: Leg) {
 type CarInfo = { kind: number; dur: number; cost: number; n: number; observed: boolean; miles: number };
 function renderTip(ex: Explain | null, alts: (Explain | null)[], cars: CarInfo[] = []) {
   if (!ex || hoverTile !== ex.tile) return;
+  if (budgetMode === 'money') return renderMoneyTip(ex, alts, cars);
   const fastest = alts[0];
   const seen = new Set<number>([ex.kind, K_UBER, K_TAXI]);
   if (fastest) seen.add(fastest.kind);
@@ -317,6 +388,7 @@ function renderTip(ex: Explain | null, alts: (Explain | null)[], cars: CarInfo[]
     ...(alts.slice(1).filter((o) => o && !seen.has(o.kind)) as Explain[]),
   ];
   tip.innerHTML = `
+    ${Object.keys(params.fareOverrides ?? {}).length ? '<span class="hypo">Hypothetical fares</span>' : ''}
     <div class="zone">${ex.zone || 'Destination'}</div>
     <div class="sec"><div class="lab">Cheapest within ${T} min</div>
       <div class="big"><b>${fmt$(ex.cost)}</b><span>${fmtMin(ex.dur)} · ${KIND_NAME[ex.kind]}</span></div>
@@ -330,6 +402,29 @@ function renderTip(ex: Explain | null, alts: (Explain | null)[], cars: CarInfo[]
   tip.hidden = false;
   positionTip();
 }
+/** Money mode: headline = fastest trip within budget; then one-line comparisons (cheapest, fastest at any price, bikes, cars). */
+function renderMoneyTip(ex: Explain, alts: (Explain | null)[], cars: CarInfo[]) {
+  const cheapest = alts[alts.length - 1], fastest = alts[0];
+  const rows: { label: string; dur: number; cost: number; note?: string }[] = [];
+  if (cheapest && cheapest.cost < ex.cost - 0.004) rows.push({ label: `Cheapest · ${KIND_NAME[cheapest.kind]}`, dur: cheapest.dur, cost: cheapest.cost });
+  if (fastest && fastest.dur < ex.dur - 59) rows.push({ label: `Fastest · ${KIND_NAME[fastest.kind]}`, dur: fastest.dur, cost: fastest.cost });
+  const shown = new Set<number>([ex.kind, K_UBER, K_TAXI]);
+  for (const a of alts.slice(1, -1)) if (a && !shown.has(a.kind)) { shown.add(a.kind); rows.push({ label: KIND_NAME[a.kind], dur: a.dur, cost: a.cost }); }
+  for (const c of cars) rows.push({ label: KIND_NAME[c.kind], dur: c.dur, cost: c.cost, note: c.observed ? `${c.n.toLocaleString()} real trips` : 'estimate' });
+  tip.innerHTML = `
+    ${Object.keys(params.fareOverrides ?? {}).length ? '<span class="hypo">Hypothetical fares</span>' : ''}
+    <div class="zone">${ex.zone || 'Destination'}</div>
+    <div class="sec"><div class="lab">Fastest for $${M.toFixed(2)} or less</div>
+      <div class="big"><b>${fmtMin(ex.dur)}</b><span>${fmt$(ex.cost)} · ${KIND_NAME[ex.kind]}</span></div>
+      <ul class="legs">${ex.legs.filter((l) => l.secs >= 30 || l.mode !== 'walk').map(legHTML).join('')}</ul>
+    </div>
+    ${rows.length ? `<div class="sec alts"><div class="lab">Compare</div>${rows.map((o) => {
+      const over = o.cost > M + 1e-9;
+      return `<div><span>${o.label}${o.note ? ` <small style="color:var(--muted)">${o.note}</small>` : ''}${over ? ` <small style="color:#A51C30">over budget</small>` : ''}</span><b>${fmtMin(o.dur)} · ${fmt$(o.cost)}</b></div>`;
+    }).join('')}</div>` : ''}`;
+  tip.hidden = false;
+  positionTip();
+}
 map.getCanvas().addEventListener('mouseleave', () => { tip.hidden = true; hoverTile = -1; });
 
 // ------------------------------------------------------------------ controls
@@ -340,8 +435,36 @@ function setT(v: number) {
   if (!result) return;
   if (T > params.horizonMin) runQuery(); else { recompute(false); hoverTile = -1; }
 }
-minsEl.addEventListener('change', () => setT(+minsEl.value));
-document.querySelectorAll<HTMLButtonElement>('.stepper button').forEach((b) => b.addEventListener('click', () => setT(T + +b.dataset.step!)));
+function setM(v: number) {
+  M = Math.max(0, Math.min(100, Math.round(v * 4) / 4));
+  minsEl.value = M.toFixed(2);
+  if (!result) return;
+  // a lower budget is a subset of the last search; a higher one needs a new search (journeys over the old cap were pruned)
+  if (M > (params.maxCost ?? Infinity)) runQuery(); else { recompute(false); hoverTile = -1; }
+}
+minsEl.addEventListener('change', () => (budgetMode === 'time' ? setT(+minsEl.value) : setM(+minsEl.value)));
+// stepper: ±5 min in time mode, ±$1 in money mode
+document.querySelectorAll<HTMLButtonElement>('.stepper button').forEach((b) => b.addEventListener('click', () =>
+  budgetMode === 'time' ? setT(T + 5 * +b.dataset.step!) : setM(M + +b.dataset.step!)));
+
+// Time / Money budget switch
+const swBtns = document.querySelectorAll<HTMLButtonElement>('.budget-sw button');
+swBtns.forEach((b) => b.addEventListener('click', () => {
+  const mode = b.dataset.b as 'time' | 'money';
+  if (mode === budgetMode) return;
+  budgetMode = mode;
+  swBtns.forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.b === mode)));
+  const money = mode === 'money';
+  $('budgetPre').hidden = !money; $('budgetUnit').textContent = money ? 'max' : 'min';
+  minsEl.classList.toggle('money', money);
+  Object.assign(minsEl, money ? { min: '0', max: '100', step: '0.25' } : { min: '5', max: '120', step: '5' });
+  minsEl.value = money ? M.toFixed(2) : String(T);
+  sim.refresh();
+  hoverTile = -1; tip.hidden = true;
+  if (!result) return;
+  // re-search if the horizon grew, or when leaving money mode (that search dropped journeys over the budget)
+  if (lim() > params.horizonMin || (!money && params.maxCost !== undefined)) runQuery(); else recompute(true);
+}));
 
 const bindNum = (id: string, key: keyof Params) => $<HTMLInputElement>(id).addEventListener('change', (e) => { (params as any)[key] = Math.max(0, +(e.target as HTMLInputElement).value || 0); runQuery(); });
 bindNum('tpw', 'tripsPerWeek'); bindNum('tipUber', 'tipUber'); bindNum('tipTaxi', 'tipTaxi'); bindNum('other', 'otherRides');
@@ -377,3 +500,15 @@ modesEl.querySelectorAll<HTMLButtonElement>('.chip').forEach((b) => b.addEventLi
 
 // keep K_* imports referenced for tree-shaking clarity
 void K_WALK;
+
+setupWhatif(params, () => runQuery());
+setupAbout();
+const sim = setupSim({ params, getBudget: () => ({ mode: budgetMode, T, M, moneyH }), map, h3ids: () => h3ids, beforeId: 'highway_path',
+  // money mode's trip-time limit, shared by the map and the simulation
+  setMoneyH: (v) => {
+    moneyH = Math.max(5, Math.min(120, Math.round(v)));
+    if (budgetMode !== 'money' || !result) return;
+    if (moneyH > params.horizonMin) runQuery(); else { recompute(false); hoverTile = -1; }
+  },
+  // the right-hand "area reachable" box describes the single pin, so it's hidden while the simulation heatmap is shown
+  setSim: (active, layers) => { simActive = active; simLayers = layers; tip.hidden = true; $('side').hidden = active; render(); } });
