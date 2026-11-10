@@ -23,3 +23,23 @@
 #simExitBar:focus-visible { outline: 2px solid #FCCC0A; }
 .sim-tip { position: fixed; z-index: 20; pointer-events: none; min-width: 200px; max-width: 280px; }
 .sim-note { margin: 0; }
+/* effective-area line in the right-hand box (pin view) */
+.eff-line { margin: -6px 0 12px; font: 500 12.5px var(--body); color: var(--ink-2); }
+.eff-line b { color: var(--ink); font-weight: 800; }
+.eff-line span { color: var(--muted); }
+/* simulation view: only the Simulation panel, the heatmap and the exit button */
+body.sim-on #side, body.sim-on #thrPanel, body.sim-on #adv, body.sim-on #whatifPanel, body.sim-on #modes { display: none !important; }
+body.sim-on #simExitBar { bottom: 28px; }
+/* colour-range slider: left half = reds (min..median), right half = greens (median..max); one handle per half */
+.sim-range { display: grid; gap: 6px; }
+.sim-range > span { font: 600 13px var(--body); }
+.sim-range small { display: block; font: 500 11px var(--body); color: var(--muted); }
+.dual { display: flex; height: 22px; align-items: center; position: relative; }
+.dual::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 8px; transform: translateY(-50%); border-radius: 4px; background: var(--grad); }
+.dual input { position: relative; flex: 1 1 50%; width: 50%; margin: 0; height: 22px; background: transparent; -webkit-appearance: none; appearance: none; cursor: pointer; }
+.dual input::-webkit-slider-runnable-track { background: transparent; height: 22px; }
+.dual input::-moz-range-track { background: transparent; }
+.dual input::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; margin-top: 3px; border-radius: 50%; background: #fff; border: 2px solid #111; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+.dual input::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 2px solid #111; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+.dual input:focus-visible { outline: none; }
+.dual input:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px #FCCC0A; }

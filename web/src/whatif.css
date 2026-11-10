@@ -24,3 +24,14 @@
 #rightcol #adv .panel-body { max-height: none; }
 @media (max-width: 900px) { #rightcol { display: contents; } #rightcol .panel { position: fixed; } }
 #leftcol > .panel, #rightcol > .panel { flex-shrink: 0; }
+/* Threshold pane (right column): big editable number styled like the area hero */
+#thrPanel { padding: 14px 16px 12px; }
+.thr-hero { display: flex; align-items: baseline; gap: 4px; margin-top: 6px; }
+.thr-hero > em { font: 900 32px/1 var(--head); font-style: normal; color: var(--ink); }
+.thr-hero input { all: unset; width: 3.6ch; font: 900 40px/1 var(--head); letter-spacing: -.02em; color: var(--ink); border-bottom: 2px solid var(--rule); padding-bottom: 2px; -moz-appearance: textfield; }
+.thr-hero input::-webkit-outer-spin-button, .thr-hero input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.thr-hero input::placeholder { color: var(--muted); }
+.thr-hero input:hover { border-bottom-color: var(--muted); }
+.thr-hero input:focus-visible { border-bottom-color: #FCCC0A; }
+.thr-hero > span { margin-left: 6px; font: 500 13px var(--body); color: var(--ink-2); }
+.thr-hero > span em { font-style: normal; font-weight: 700; color: var(--ink); }
