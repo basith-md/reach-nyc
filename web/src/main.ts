@@ -36,6 +36,7 @@ const bandOf = (c: number) => { for (let i = 0; i < BANDS.length; i++) if (c <= 
 const TILE_KM2 = 0.0150475; // H3 res-10 average
 // money-budget mode: colour by the fastest trip that fits the budget (green = quick, red = slow)
 let moneyH = 60;           // longest trip considered in money mode (minutes); set from the Simulation panel
+let timeCap = Infinity;    // optional spending cap in time mode ($); set from the Simulation panel
 const TBANDS = [
   { max: 10, label: 'under 10 min', color: '#1B8A4C' },
   { max: 15, label: '10–15 min', color: '#5FBC7C' },
@@ -71,7 +72,7 @@ const KIND_NAME = ['Walk', 'Citi Bike classic', 'Citi Bike e-bike', 'Transit', '
 // ------------------------------------------------------------------ state
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const params: Params = {
-  origin: -1, day: 'wkd', depSec: 8.5 * 3600, horizonMin: 30, tripsPerWeek: 5, countReturn: true, otherRides: 0,
+  origin: -1, day: 'wkd', depSec: 8.5 * 3600, horizonMin: 30, tripsPerWeek: 1, countReturn: true, otherRides: 0,
   tipUber: 0, tipTaxi: 0, taxiWaitMin: 0, includeFirstWait: false, membership: 'nonmember',
   modes: { subway: true, bus: true, express: true, rail: true, path: true, ferry: true, classic: true, ebike: true, uber: true, taxi: true },
 };
@@ -79,6 +80,10 @@ let T = 30;                 // display budget (minutes)
 let M = 5;                  // money budget ($), used when budgetMode === 'money'
 let budgetMode: 'time' | 'money' = 'time';
 const lim = () => (budgetMode === 'time' ? T : moneyH);   // time limit shown on the map (minutes)
+const capNow = () => (budgetMode === 'money' ? M : timeCap); // spending cap shown on the map ($, Infinity = none)
+// a new search is needed when the time horizon or the spending cap grows past what the last search covered
+const needsQuery = () => lim() > params.horizonMin || capNow() > (params.maxCost ?? Infinity);
+const refresh = () => { if (!result) return; if (needsQuery()) runQuery(); else { recompute(false); hoverTile = -1; } };
 let N = 0;
 let h3ids: string[] = [];
 let h3index = new Map<string, number>();
@@ -190,7 +195,7 @@ function runQuery(immediate = false) {
   clearTimeout(queryTimer);
   queryTimer = window.setTimeout(() => {
     params.horizonMin = Math.max(lim(), 15);
-    params.maxCost = budgetMode === 'money' ? M : undefined;   // money mode: prune journeys over budget (much faster)
+    params.maxCost = isFinite(capNow()) ? capNow() : undefined;   // prune journeys over the cap (much faster)
     latestQ = ++qid;
     pinEl.classList.add('busy');
     status('Finding every route…');
@@ -210,11 +215,12 @@ function onResult(res: QueryResult) {
 function recompute(animate: boolean) {
   if (!result) return;
   const { off, dur, cost } = result;
-  const L = lim(), limS = L * 60, money = budgetMode === 'money', Mx = M + 1e-9;
+  const L = lim(), limS = L * 60, money = budgetMode === 'money', Mx = M + 1e-9, capT = timeCap + 1e-9;
   for (let t = 0; t < N; t++) {
     let f = 1e6, c = Infinity, ci = -1;
     if (!money) {
       for (let i = off[t]; i < off[t + 1]; i++) {
+        if (cost[i] > capT) continue;                 // optional spending cap (Simulation panel)
         if (dur[i] / 60 < f) f = dur[i] / 60;
         if (dur[i] <= limS && cost[i] < c) { c = cost[i]; ci = i - off[t]; }
       }
@@ -307,7 +313,7 @@ function updateStats() {
   let total = 0;
   for (let t = 0; t < N; t++) if (fastestMin[t] <= lim()) { counts[money ? tbandOf(fastestMin[t]) : bandOf(cheapCost[t])]++; total++; }
   $('areaTotal').textContent = (total * TILE_KM2).toFixed(1);
-  $('heroSub').innerHTML = money ? `km² reachable for <b>$${M.toFixed(2)}</b> <small style="color:var(--muted)">(trips up to ${moneyH} min)</small>` : `km² reachable in <b>${T}</b> min`;
+  $('heroSub').innerHTML = money ? `km² reachable for <b>$${M.toFixed(2)}</b> <small style="color:var(--muted)">(trips up to ${moneyH} min)</small>` : `km² reachable in <b>${T}</b> min${isFinite(timeCap) ? ` <small style="color:var(--muted)">(up to $${timeCap.toFixed(2)})</small>` : ''}`;
   $('legendHead').textContent = money ? 'Fastest way there takes…' : 'Cheapest way there costs…';
   const bar = $('bandBar');
   bar.innerHTML = bands.map((b, i) => `<i style="background:${b.color};flex-grow:${counts[i]}"></i>`).join('');
@@ -436,14 +442,14 @@ function setT(v: number) {
   T = Math.max(5, Math.min(120, Math.round(v)));
   minsEl.value = String(T);
   if (!result) return;
-  if (T > params.horizonMin) runQuery(); else { recompute(false); hoverTile = -1; }
+  refresh();
 }
 function setM(v: number) {
   M = Math.max(0, Math.min(100, Math.round(v * 4) / 4));
   minsEl.value = M.toFixed(2);
   if (!result) return;
   // a lower budget is a subset of the last search; a higher one needs a new search (journeys over the old cap were pruned)
-  if (M > (params.maxCost ?? Infinity)) runQuery(); else { recompute(false); hoverTile = -1; }
+  refresh();
 }
 minsEl.addEventListener('change', () => (budgetMode === 'time' ? setT(+minsEl.value) : setM(+minsEl.value)));
 // stepper: ±5 min in time mode, ±$1 in money mode
@@ -466,7 +472,7 @@ swBtns.forEach((b) => b.addEventListener('click', () => {
   hoverTile = -1; tip.hidden = true;
   if (!result) return;
   // re-search if the horizon grew, or when leaving money mode (that search dropped journeys over the budget)
-  if (lim() > params.horizonMin || (!money && params.maxCost !== undefined)) runQuery(); else recompute(true);
+  if (needsQuery()) runQuery(); else recompute(true);
 }));
 
 const bindNum = (id: string, key: keyof Params) => $<HTMLInputElement>(id).addEventListener('change', (e) => { (params as any)[key] = Math.max(0, +(e.target as HTMLInputElement).value || 0); runQuery(); });
@@ -506,12 +512,9 @@ void K_WALK;
 
 setupWhatif(params, () => runQuery());
 setupAbout();
-const sim = setupSim({ params, getBudget: () => ({ mode: budgetMode, T, M, moneyH }), map, h3ids: () => h3ids, beforeId: 'highway_path',
-  // money mode's trip-time limit, shared by the map and the simulation
-  setMoneyH: (v) => {
-    moneyH = Math.max(5, Math.min(120, Math.round(v)));
-    if (budgetMode !== 'money' || !result) return;
-    if (moneyH > params.horizonMin) runQuery(); else { recompute(false); hoverTile = -1; }
-  },
+const sim = setupSim({ params, getBudget: () => ({ mode: budgetMode, T, M, moneyH, timeCap }), map, h3ids: () => h3ids, beforeId: 'highway_path',
+  // money mode's trip-time limit and time mode's spending cap, each shared by the map and the simulation
+  setMoneyH: (v) => { moneyH = Math.max(5, Math.min(120, Math.round(v))); if (budgetMode === 'money') refresh(); },
+  setTimeCap: (v) => { timeCap = v; if (budgetMode === 'time') refresh(); },
   // the right-hand "area reachable" box describes the single pin, so it's hidden while the simulation heatmap is shown
   setSim: (active, layers) => { simActive = active; simLayers = layers; tip.hidden = true; $('side').hidden = active; render(); } });
