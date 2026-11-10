@@ -1,5 +1,6 @@
 // Connectivity simulation: many origins across the city, each run with the UI's exact settings,
-// scored by km² reachable within the time budget for <= a dollar threshold, interpolated into a heatmap.
+// scored by EFFECTIVE area reachable: area reachable within the time and cost limits, scaled up by how little usable land
+// surrounds the point (area ÷ land fraction of a straight-line circle, R = 20 km/h x time limit), interpolated into a heatmap.
 import './sim.css';
 import { H3HexagonLayer } from '@deck.gl/geo-layers';
 import { ScatterplotLayer } from '@deck.gl/layers';
@@ -9,8 +10,6 @@ import type { Params } from './types';
 interface Ctx {
   params: Params;                       // live UI settings (snapshotted at Run)
   getBudget: () => { mode: 'time' | 'money'; T: number; M: number; moneyH: number; timeCap: number };   // live header budget + the other-axis caps
-  setMoneyH: (min: number) => void;     // change money mode's trip-length cap (map + simulation)
-  setTimeCap: (usd: number) => void;    // change time mode's spending cap, Infinity = any price (map + simulation)
   map: MLMap;
   h3ids: () => string[];
   setSim: (active: boolean, layers: any[]) => void;
@@ -30,6 +29,14 @@ const HEAT = ['#7F0E1E', '#B4232C', '#E04A3A', '#F38A6B', '#FBC3A8', '#C7E9B4', 
 const rgb = (h: string) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
 const HEAT_RGB = HEAT.map(rgb);
 
+// Effective area reachable (shared with the pin view):
+//   R = average straight-line distance from the point to everywhere it can reach
+//   land fraction = NYC land within R of the point / (pi R^2)
+//   effective area = area reachable / land fraction  (fraction floored at 25%, so edge points get at most a 4x boost)
+export const MIN_LAND_FRAC = 0.25;
+export const landFrac = (landKm2: number, Rkm: number) =>
+  Rkm > 0 ? Math.max(MIN_LAND_FRAC, Math.min(1, landKm2 / (Math.PI * Rkm * Rkm))) : 1;
+
 export function setupSim(ctx: Ctx) {
   let lat: Float32Array | null = null, lng: Float32Array | null = null;
   const llReady = fetch('/data/tiles_ll.bin').then((r) => r.arrayBuffer()).then((b) => {
@@ -44,8 +51,6 @@ export function setupSim(ctx: Ctx) {
   panel.innerHTML = `<button class="panel-head" type="button" aria-expanded="true"><span>Simulation</span><i></i></button>
     <div class="panel-body">
       <p class="fine" style="margin:0">Get a distribution map of the whole city. We drop pins everywhere, measure how much of NYC each spot can reach with your current settings, and colour the result so transit deserts (red) and well-connected areas (green) stand out.</p>
-      <div class="row" id="simHRow" hidden><label for="simH">Trips up to<small>time limit in money mode (map too)</small></label><div class="unit"><input id="simH" type="number" min="5" max="120" step="5" value="60" /><em>min</em></div></div>
-      <div class="row" id="simCRow"><label for="simC">Spend up to<small>cost limit in time mode (map too); blank = any price</small></label><div class="unit"><em>$</em><input id="simC" type="number" min="0" max="100" step="0.25" placeholder="any" /></div></div>
       <div class="sim-res" role="radiogroup" aria-label="Resolution">
         ${(Object.keys(RES) as ResKey[]).map((k) => `<label><input type="radio" name="simRes" value="${k}" ${k === 'med' ? 'checked' : ''}/> <span>${RES[k].label}<small data-n="${k}">…</small></span></label>`).join('')}
       </div>
@@ -53,6 +58,17 @@ export function setupSim(ctx: Ctx) {
       <div class="sim-actions"><button type="button" id="simRun" class="sim-primary">Run simulation</button><button type="button" id="simCancel" hidden>Cancel</button></div>
       <div class="sim-progress" hidden><div class="bar"><i></i></div><span id="simStatus"></span></div>
       <div class="sim-done" hidden>
+        <div class="sim-res" role="radiogroup" aria-label="Metric">
+          <label><input type="radio" name="simMetric" value="eff" checked /> <span>Effective area<small>scaled up where water or the city edge leaves less land nearby</small></span></label>
+          <label><input type="radio" name="simMetric" value="area" /> <span>Area<small>km² reachable as is</small></span></label>
+        </div>
+        <div class="sim-range">
+          <span>Colour range<small>drag the ends in to see more difference in the middle</small></span>
+          <div class="dual" style="--grad:linear-gradient(to right, ${HEAT.join(', ')})">
+            <input type="range" id="simLo" min="0" max="50" step="1" value="0" aria-label="Darkest red starts at percentile" />
+            <input type="range" id="simHi" min="50" max="100" step="1" value="100" aria-label="Darkest green starts at percentile" />
+          </div>
+        </div>
         <ol class="legend" id="simLegend"></ol>
         <p class="fine sim-note" id="simNote"></p>
         <div class="sim-actions"><button type="button" id="simPng">Download map (PNG)</button><button type="button" id="simCsv">Download data (CSV)</button></div>
@@ -88,10 +104,6 @@ export function setupSim(ctx: Ctx) {
       }
     });
     const b = ctx.getBudget();
-    $('#simHRow').hidden = b.mode !== 'money';
-    $('#simCRow').hidden = b.mode !== 'time';
-    const hEl = $('#simH') as HTMLInputElement;
-    if (document.activeElement !== hEl) hEl.value = String(b.moneyH);
     const p = ctx.params, hh = String(Math.floor(p.depSec / 3600)).padStart(2, '0'), mm = String(Math.floor(p.depSec % 3600 / 60)).padStart(2, '0');
     const off = Object.entries(p.modes).filter(([, v]) => !v).map(([k]) => k);
     $('#simUses').textContent = `Uses: ${b.mode === 'time' ? `${b.T} min, ${isFinite(b.timeCap) ? `up to $${b.timeCap.toFixed(2)}` : 'any price'}` : `$${b.M.toFixed(2)}, trips up to ${b.moneyH} min`} · ${({ wkd: 'Weekday', sat: 'Saturday', sun: 'Sunday' })[p.day]} ${hh}:${mm} · ${p.tripsPerWeek} trip${p.tripsPerWeek === 1 ? "" : "s"}/wk` +
@@ -103,8 +115,16 @@ export function setupSim(ctx: Ctx) {
   // ---------------- run
   let workers: Worker[] = [];
   let cancelled = false;
-  let result: { origins: number[]; km2: Float32Array; snap: Params; T: number; D: number; res: ResKey } | null = null;
+  // eff = effective area reachable = km2 / landFrac (see landFrac above; R = each point's average reach distance).
+  // km2 (raw area reachable), land (km² of NYC land within R) and rad (R, km) are kept for the tooltip and CSV.
+  let result: { origins: number[]; km2: Float32Array; eff: Float32Array; land: Float32Array; rad: Float32Array; snap: Params; T: number; D: number; res: ResKey } | null = null;
   const fmt = (v: number) => v.toFixed(1);
+  const pctf = (v: number) => `${Math.round(v)}%`;
+  // which metric is mapped: effective area (default) or raw area reachable; switching recolours without a re-run
+  type Metric = 'eff' | 'area';
+  const metric = (): Metric => (panel.querySelector<HTMLInputElement>('input[name=simMetric]:checked')?.value ?? 'eff') as Metric;
+  const vals = () => (metric() === 'eff' ? result!.eff : result!.km2);
+  const mName = () => (metric() === 'eff' ? 'Effective area' : 'Area');
   const rule = (r: { T: number; D: number }) => isFinite(r.D) ? `for $${r.D.toFixed(2)} or less (trips up to ${r.T} min)` : `within ${r.T} min, any price`;
   const tag = (r: { T: number; D: number }) => isFinite(r.D) ? `$${r.D}` : `${r.T}min`;
 
@@ -123,14 +143,18 @@ export function setupSim(ctx: Ctx) {
     const kx = 84.3, ky = 111.32, x = lng[t] * kx, y = lat[t] * ky;
     let ni = 0, nd = Infinity;
     result.origins.forEach((o, i) => { const d = (lng![o] * kx - x) ** 2 + (lat![o] * ky - y) ** 2; if (d < nd) { nd = d; ni = i; } });
-    const v = tileVal[t], pct = Math.round(100 * Array.from(result.km2).filter((a) => a <= v).length / result.km2.length);
+    const mv = vals(), v = tileVal[t], better = Math.round(100 * Array.from(mv).filter((a) => a <= v).length / mv.length);
+    const R = result.rad[ni];
     tip.innerHTML = `<div class="zone">Simulated reach</div>
       <div class="sec"><div class="lab">From around here</div>
-        <div class="big"><b style="white-space:nowrap">${fmt(v)} km²</b></div>
+        <div class="big"><b style="white-space:nowrap">${fmt(v)} km²</b><span>${metric() === 'eff' ? 'effective area' : 'area'}</span></div>
         <div style="color:var(--ink-2)">reachable ${rule(result)}</div>
-        <div style="color:var(--ink-2)">Better connected than ${pct}% of points</div></div>
-      <div class="sec alts"><div><span>Nearest simulated pin (${Math.sqrt(nd).toFixed(1)} km)</span><b>${fmt(result.km2[ni])} km²</b></div>
-        <div><span>City median</span><b>${fmt(Array.from(result.km2).sort((a, b) => a - b)[result.km2.length >> 1])} km²</b></div></div>`;
+        <div style="color:var(--ink-2)">Better connected than ${better}% of points</div></div>
+      <div class="sec alts"><div><span>Nearest simulated pin (${Math.sqrt(nd).toFixed(1)} km)</span><b>${fmt(mv[ni])} km²</b></div>
+        <div><span>· effective area</span><b>${fmt(result.eff[ni])} km²</b></div>
+        <div><span>· actual area reached</span><b>${fmt(result.km2[ni])} km²</b></div>
+        <div><span>· land within ${fmt(R)} km (avg reach)</span><b>${pctf(100 * landFrac(result.land[ni], R))}</b></div>
+        <div><span>City median</span><b>${fmt(Array.from(mv).sort((a, b) => a - b)[mv.length >> 1])} km²</b></div></div>`;
     tip.hidden = false;
     const w = tip.offsetWidth, h = tip.offsetHeight;
     let px = info.x + 18, py = info.y + 18;
@@ -142,12 +166,9 @@ export function setupSim(ctx: Ctx) {
 
   $('#simRun').addEventListener('click', run);
   $('#simCancel').addEventListener('click', () => { cancelled = true; stop(); setStatus('Cancelled.'); ui('idle'); });
-  $('#simH').addEventListener('change', (e) => { ctx.setMoneyH(+(e.target as HTMLInputElement).value || 60); refreshInfo(); });
-  $('#simC').addEventListener('change', (e) => {
-    const v = (e.target as HTMLInputElement).value.trim();
-    ctx.setTimeCap(v === '' ? Infinity : Math.max(0, +v || 0));
-    refreshInfo();
-  });
+  panel.querySelectorAll('input[name=simMetric]').forEach((el) => el.addEventListener('change', () => { if (result) show(); }));
+  $('#simLo').addEventListener('input', () => paint());
+  $('#simHi').addEventListener('input', () => paint());
   $('#simPng').addEventListener('click', downloadPng);
   $('#simCsv').addEventListener('click', downloadCsv);
 
@@ -174,6 +195,7 @@ export function setupSim(ctx: Ctx) {
     snap.maxCost = D;                                      // only area within $D counts, so prune pricier journeys
     const origins = originsFor(resKey);
     const km2 = new Float32Array(origins.length).fill(NaN);
+    const eff = new Float32Array(origins.length).fill(NaN), land = new Float32Array(origins.length).fill(NaN), rad = new Float32Array(origins.length).fill(NaN);
     cancelled = false; stop(); ui('running'); setBar(0);
     setStatus(`Starting ${cores} parallel workers…`);
     const t0 = performance.now();
@@ -191,7 +213,7 @@ export function setupSim(ctx: Ctx) {
           const m = ev.data;
           if (m.type === 'ready') { feed(w); feed(w); return; }      // keep two jobs queued per worker
           if (m.type !== 'simres' || cancelled) return;
-          km2[m.job] = m.km2; done++;
+          km2[m.job] = m.km2; land[m.job] = m.landKm2; rad[m.job] = m.radKm; eff[m.job] = m.km2 / landFrac(m.landKm2, m.radKm); done++;
           const el = performance.now() - t0, eta = el / done * (origins.length - done);
           setBar(done / origins.length);
           setStatus(`${done} / ${origins.length} points · ${Math.round(el / 1000)} s elapsed · ~${Math.ceil(eta / 1000)} s left`);
@@ -203,7 +225,7 @@ export function setupSim(ctx: Ctx) {
     stop();
     if (cancelled) return;
     lastMsPerOrigin = (performance.now() - t0) * cores / origins.length;
-    result = { origins, km2, snap, T, D, res: resKey };
+    result = { origins, km2, eff, land, rad, snap, T, D, res: resKey };
     setStatus(`Done: ${origins.length} points in ${Math.round((performance.now() - t0) / 1000)} s.`);
     show();
     ui('done');
@@ -215,7 +237,7 @@ export function setupSim(ctx: Ctx) {
   let breaks: number[] = [], lo: number[] = [], hi: number[] = [];
   function show() {
     if (!result || !lat || !lng) return;
-    const { origins, km2 } = result;
+    const { origins } = result, km2 = vals();               // interpolate the selected metric
     const N = lat.length, kx = 84.3, ky = 111.32;
     const ox = origins.map((t) => lng![t] * kx), oy = origins.map((t) => lat![t] * ky);
     const R = RES[result.res].km * 1.6;                       // blend radius
@@ -230,14 +252,28 @@ export function setupSim(ctx: Ctx) {
       }
       tileVal[t] = wsum > 0 ? vsum / wsum : km2[nearest];
     }
-    // pivot at the city median: 5 even steps from min to it (reds) and 5 from it to max (greens)
+    paint();
+  }
+
+  /** Colour the interpolated values. Cheap, so the colour-range slider can call it while dragging. */
+  let paintVer = 0;
+  function paint() {
+    if (!result || !lat || !lng) return;
+    const { origins } = result, km2 = vals();               // colour by the selected metric
+    const N = lat.length;
+    // pivot at the city median; the slider's two handles set where the darkest red / green start (percentiles of the points),
+    // so pulling them in clips the extremes and spreads the 10 colours over the middle
     const sorted = Array.from(km2).sort((a, b) => a - b);
+    const q = (p: number) => sorted[Math.round(p / 100 * (sorted.length - 1))];
     const mn = sorted[0], mx = sorted[sorted.length - 1];
-    const thr = Math.min(Math.max(sorted[sorted.length >> 1], mn + 1e-3), mx - 1e-3);
+    const thr = Math.min(Math.max(q(50), mn + 1e-3), mx - 1e-3);
+    const cLo = Math.min(q(+($('#simLo') as HTMLInputElement).value), thr - 1e-3);
+    const cHi = Math.max(q(+($('#simHi') as HTMLInputElement).value), thr + 1e-3);
     const lin = (a: number, b: number) => [1, 2, 3, 4].map((k) => a + (b - a) * k / 5);
-    breaks = [...lin(mn, thr), thr, ...lin(thr, mx)];
+    breaks = [...lin(cLo, thr), thr, ...lin(thr, cHi)];
     lo = [mn, ...breaks]; hi = [...breaks, mx];
     const bin = (v: number) => { let i = 0; while (i < breaks.length && v > breaks[i]) i++; return i; };
+    paintVer++;
     const ids = ctx.h3ids();
     const data = Array.from({ length: N }, (_, i) => i);
     const layers = [
@@ -245,7 +281,7 @@ export function setupSim(ctx: Ctx) {
         id: 'sim-heat', data, getHexagon: (i: number) => ids[i], highPrecision: false, coverage: 1, stroked: false,
         getFillColor: (i: number) => [...HEAT_RGB[bin(tileVal[i])], 235] as any, beforeId: ctx.beforeId,
         pickable: true, autoHighlight: true, highlightColor: [255, 255, 255, 90], onHover: simHover,
-        updateTriggers: { getFillColor: [result.origins.length, result.D, result.T] },
+        updateTriggers: { getFillColor: paintVer },
       } as any),
       new ScatterplotLayer({
         id: 'sim-dots', data: origins.map((t, i) => ({ p: [lng![t], lat![t]], v: km2[i] })), getPosition: (d: any) => d.p,
@@ -256,16 +292,19 @@ export function setupSim(ctx: Ctx) {
     ctx.setSim(true, layers);
     exitBar.hidden = false;
     const nGood = Array.from(km2).filter((v) => v >= thr).length;
-    $('#simLegend').innerHTML = `<li class="lh"><b>Area reachable</b><span></span><span>km²</span></li>` +
+    $('#simLegend').innerHTML = `<li class="lh"><b>${mName()}</b><span></span><span>km²</span></li>` +
       HEAT.map((c, i) => `<li><span class="sw" style="--c:${c}"></span><span>${fmt(lo[i])}–${fmt(hi[i])}</span><span></span></li>`).reverse().join('');
-    $('#simNote').textContent = `Green is above the city median of ${fmt(thr)} km², red is below. ${nGood} of ${km2.length} points are green.`;
+    $('#simNote').textContent = (metric() === 'eff'
+      ? 'Area reachable, scaled up where water or the city edge leaves less land within each point\'s average reach distance (as if it were all land). '
+      : 'Area reachable as is (no adjustment for water or the city edge). ') +
+      `Green is above the city median of ${fmt(thr)} km², red is below. ${nGood} of ${km2.length} points are green.`;
   }
 
   // ---------------- downloads
   function title() {
     const r = result!, p = r.snap, hh = String(Math.floor(p.depSec / 3600)).padStart(2, '0'), mm = String(Math.floor(p.depSec % 3600 / 60)).padStart(2, '0');
     return {
-      main: `Area reachable (km²) · ${rule(r)}`,
+      main: `${mName()} reachable (km²) · ${rule(r)}`,
       sub: `${({ wkd: 'Weekday', sat: 'Saturday', sun: 'Sunday' })[p.day]} ${hh}:${mm} · ${p.tripsPerWeek} trip${p.tripsPerWeek === 1 ? "" : "s"}/week · ${r.origins.length} points (${RES[r.res].label})` +
         `${Object.keys(p.fareOverrides ?? {}).length ? ' · hypothetical fares' : ''}`,
     };
@@ -312,7 +351,7 @@ export function setupSim(ctx: Ctx) {
         g.fillStyle = '#c8c8c8'; g.font = `500 ${13 * s}px ${F}`; g.fillText(t.sub, 20 * s, 58 * s);
         // legend column
         const lx = cw + 16 * s; let y = top + 28 * s;
-        g.fillStyle = '#111'; g.font = `700 ${13 * s}px ${F}`; g.fillText('km² reachable', lx, y);
+        g.fillStyle = '#111'; g.font = `700 ${13 * s}px ${F}`; g.fillText(`${mName()} reachable, km²`, lx, y);
         g.fillStyle = '#555'; g.font = `500 ${11 * s}px ${F}`; g.fillText(`green above the median (${fmt(breaks[4])}), red below`, lx, y + 18 * s);
         y += 34 * s;
         for (let i = HEAT.length - 1; i >= 0; i--) {           // best (green) at the top
@@ -332,8 +371,11 @@ export function setupSim(ctx: Ctx) {
     if (!result || !lat || !lng) return;
     const t = title();
     const r = result;
-    const rows = [`# ${t.main}`, `# ${t.sub}`, 'lat,lng,km2_reachable'];
-    r.origins.forEach((o, i) => rows.push(`${lat![o].toFixed(5)},${lng![o].toFixed(5)},${r.km2[i].toFixed(3)}`));
+    const rows = [`# ${t.main}`, `# ${t.sub}`, '# radius_km = average straight-line distance from the point to everywhere it can reach',
+      `# effective_km2 = km2_reachable / land_fraction (land_fraction = NYC land within radius / (pi radius^2), floored at ${MIN_LAND_FRAC})`,
+      'lat,lng,effective_km2,km2_reachable,radius_km,land_fraction,land_km2_in_circle'];
+    r.origins.forEach((o, i) => rows.push(`${lat![o].toFixed(5)},${lng![o].toFixed(5)},${r.eff[i].toFixed(3)},` +
+      `${r.km2[i].toFixed(3)},${r.rad[i].toFixed(3)},${landFrac(r.land[i], r.rad[i]).toFixed(3)},${r.land[i].toFixed(3)}`));
     save(new Blob([rows.join('\n')], { type: 'text/csv' }), `nyc-connectivity-${tag(result)}.csv`);
   }
   function save(b: Blob, name: string) {

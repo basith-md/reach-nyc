@@ -10,7 +10,7 @@ import type { Explain, Leg, ModeKey, Params, QueryResult } from './types';
 import { K_CLASSIC, K_EBIKE, K_TAXI, K_TRANSIT, K_UBER, K_WALK } from './types';
 import { setupWhatif } from './whatif';
 import { setupAbout } from './about';
-import { setupSim } from './sim';
+import { setupSim, landFrac } from './sim';
 import { inject } from '@vercel/analytics';
 
 inject();   // Vercel Web Analytics (page views; no-op locally in dev)
@@ -313,6 +313,20 @@ function updateStats() {
   let total = 0;
   for (let t = 0; t < N; t++) if (fastestMin[t] <= lim()) { counts[money ? tbandOf(fastestMin[t]) : bandOf(cheapCost[t])]++; total++; }
   $('areaTotal').textContent = (total * TILE_KM2).toFixed(1);
+  // effective area: same formula as the simulation. R = average straight-line distance to the reachable hexagons,
+  // land fraction = NYC land within R / (pi R^2), effective = area / land fraction
+  const effEl = $('effLine');
+  if (tileLat && tileLng && params.origin >= 0 && total > 0) {
+    const kx = 84.3, ky = 111.32, ox = tileLng[params.origin] * kx, oy = tileLat[params.origin] * ky;
+    const dist = (t: number) => Math.hypot(tileLng![t] * kx - ox, tileLat![t] * ky - oy);
+    let dsum = 0;
+    for (let t = 0; t < N; t++) if (fastestMin[t] <= lim()) dsum += dist(t);
+    const R = dsum / total;
+    let land = 0;
+    for (let t = 0; t < N; t++) if (dist(t) <= R) land++;
+    const f = landFrac(land * TILE_KM2, R);
+    effEl.innerHTML = `Effective area <b>${(total * TILE_KM2 / f).toFixed(1)} km²</b> <span>· ${Math.round(f * 100)}% land within ${R.toFixed(1)} km (avg reach)</span>`;
+  } else effEl.textContent = '';
   $('heroSub').innerHTML = money ? `km² reachable for <b>$${M.toFixed(2)}</b> <small style="color:var(--muted)">(trips up to ${moneyH} min)</small>` : `km² reachable in <b>${T}</b> min${isFinite(timeCap) ? ` <small style="color:var(--muted)">(up to $${timeCap.toFixed(2)})</small>` : ''}`;
   $('legendHead').textContent = money ? 'Fastest way there takes…' : 'Cheapest way there costs…';
   const bar = $('bandBar');
@@ -330,6 +344,14 @@ function updateStats() {
     $('originName').textContent = ex ? `From ${ex[zoneOf(o)] || 'here'}` : 'From the pin';
   }
 }
+let tileLat: Float32Array | null = null, tileLng: Float32Array | null = null;   // tile centres, for the effective-area circle
+fetch('/data/tiles_ll.bin').then((r) => r.arrayBuffer()).then((b) => {
+  const f = new Float32Array(b), n = f.length / 2;
+  const la = new Float32Array(n), lo = new Float32Array(n);
+  for (let i = 0; i < n; i++) { la[i] = f[2 * i]; lo[i] = f[2 * i + 1]; }
+  tileLng = lo; tileLat = la;
+  if (result) updateStats();
+});
 let zoneArr: Uint16Array | null = null;
 const zoneOf = (t: number) => (zoneArr ? zoneArr[t] : 0);
 fetch('/data/tiles_zone.bin').then((r) => r.arrayBuffer()).then((b) => { zoneArr = new Uint16Array(b); });
@@ -468,7 +490,7 @@ swBtns.forEach((b) => b.addEventListener('click', () => {
   minsEl.classList.toggle('money', money);
   Object.assign(minsEl, money ? { min: '0', max: '100', step: '0.25' } : { min: '5', max: '120', step: '5' });
   minsEl.value = money ? M.toFixed(2) : String(T);
-  sim.refresh();
+  sim.refresh(); syncThreshold();
   hoverTile = -1; tip.hidden = true;
   if (!result) return;
   // re-search if the horizon grew, or when leaving money mode (that search dropped journeys over the budget)
@@ -512,9 +534,64 @@ void K_WALK;
 
 setupWhatif(params, () => runQuery());
 setupAbout();
+// Threshold pane (right column, above Advanced): the opposite limit to the header budget.
+// Time mode -> max $ per trip (blank = any price); money mode -> longest trip in minutes. Used by the map and the simulation.
+const thrPanel = document.createElement('aside');
+thrPanel.id = 'thrPanel'; thrPanel.className = 'panel';
+thrPanel.innerHTML = `<label class="kicker" for="thrIn">Threshold</label>
+  <div class="thr-hero"><em id="thrPre">$</em><input id="thrIn" type="number" inputmode="decimal" /><span><em id="thrPost">min</em> <small id="thrHint"></small></span></div>`;
+document.getElementById('rightcol')?.insertBefore(thrPanel, $('adv'));
+const thrIn = $<HTMLInputElement>('thrIn');
+function syncThreshold() {
+  const money = budgetMode === 'money';
+  $('thrHint').textContent = money ? 'longest trip' : 'max cost per trip';
+  $('thrPre').hidden = money; $('thrPost').hidden = !money;
+  Object.assign(thrIn, money ? { min: '5', max: '120', step: '5', placeholder: '' } : { min: '0', max: '100', step: '0.25', placeholder: 'any' });
+  thrIn.value = money ? String(moneyH) : isFinite(timeCap) ? String(timeCap) : '';
+  fitThr();
+}
+// size the big number to its content so the unit/hint sit right after it
+const thrMeasure = document.createElement('canvas').getContext('2d')!;
+const fitThr = () => {
+  $('thrPre').hidden = budgetMode === 'money' || thrIn.value.trim() === '';   // "any", not "$any"
+  thrMeasure.font = getComputedStyle(thrIn).font;
+  thrIn.style.width = `${Math.ceil(thrMeasure.measureText(thrIn.value || thrIn.placeholder || '0').width) + 6}px`;
+};
+thrIn.addEventListener('input', fitThr);
+thrIn.addEventListener('change', () => {
+  const v = thrIn.value.trim();
+  if (budgetMode === 'money') moneyH = Math.max(5, Math.min(120, Math.round(+v || 60)));
+  else timeCap = v === '' ? Infinity : Math.max(0, +v || 0);
+  syncThreshold(); sim.refresh(); refresh();
+});
+syncThreshold();
+
 const sim = setupSim({ params, getBudget: () => ({ mode: budgetMode, T, M, moneyH, timeCap }), map, h3ids: () => h3ids, beforeId: 'highway_path',
-  // money mode's trip-time limit and time mode's spending cap, each shared by the map and the simulation
-  setMoneyH: (v) => { moneyH = Math.max(5, Math.min(120, Math.round(v))); if (budgetMode === 'money') refresh(); },
-  setTimeCap: (v) => { timeCap = v; if (budgetMode === 'time') refresh(); },
-  // the right-hand "area reachable" box describes the single pin, so it's hidden while the simulation heatmap is shown
-  setSim: (active, layers) => { simActive = active; simLayers = layers; tip.hidden = true; $('side').hidden = active; render(); } });
+  // body.sim-on hides the pin-view controls (area box, Threshold, Advanced, What if?, mode bar) while the heatmap is shown
+  setSim: (active, layers) => { simActive = active; simLayers = layers; tip.hidden = true; document.body.classList.toggle('sim-on', active); render(); } });
+
+// ------------------------------------------------------------------ tip bubble: a suggested simulation to try
+// Slides in ~3 s after load, closes itself after ~12 s (paused while hovered). "Try it" applies the settings and runs it.
+const bubble = document.createElement('aside');
+bubble.id = 'tipBubble'; bubble.setAttribute('role', 'status');
+bubble.innerHTML = `<button type="button" class="tb-x" aria-label="Close">×</button>
+  <b>Try this simulation</b>
+  <p>Where in NYC can you get furthest in <strong>20 minutes</strong> for <strong>under $5</strong>?</p>
+  <button type="button" class="tb-go">Run it</button>`;
+document.body.appendChild(bubble);
+let bubbleTimer = 0;
+const closeBubble = () => { bubble.classList.remove('show'); clearTimeout(bubbleTimer); };
+const armClose = () => { clearTimeout(bubbleTimer); bubbleTimer = window.setTimeout(closeBubble, 12000); };
+bubble.querySelector('.tb-x')!.addEventListener('click', closeBubble);
+bubble.addEventListener('mouseenter', () => clearTimeout(bubbleTimer));
+bubble.addEventListener('mouseleave', armClose);
+bubble.querySelector('.tb-go')!.addEventListener('click', () => {
+  closeBubble();
+  if (budgetMode !== 'time') document.querySelector<HTMLButtonElement>('.budget-sw button[data-b=time]')!.click();
+  setT(20);
+  timeCap = 5; syncThreshold(); sim.refresh(); refresh();
+  const sp = document.getElementById('simPanel');
+  if (sp?.classList.contains('collapsed')) sp.querySelector<HTMLButtonElement>('.panel-head')!.click();
+  document.getElementById('simRun')!.click();
+});
+window.setTimeout(() => { if (!simActive) { bubble.classList.add('show'); armClose(); } }, 3000);

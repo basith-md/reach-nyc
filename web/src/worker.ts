@@ -33,13 +33,22 @@ self.onmessage = async (ev: MessageEvent) => {
     const tt = await loadTimetable(ttDay, g!.S);
     const res = await engine!.query(p, tt, 0);
     const lim = msg.T * 60, D = msg.D + 1e-9;
-    // area (km2) of hexagons reachable within T minutes for <= $D
-    let n = 0;
+    // n = hexagons reachable within T minutes for <= $D (raw area)
+    // R = average straight-line distance from the origin to the reachable hexagons; land = NYC land hexagons within R
+    // (the client turns these into effective area = area / (land / pi R^2))
+    const kx = 84.3, ky = 111.32;                                    // km per degree at NYC latitude
+    const ox = g!.lng[p.origin] * kx, oy = g!.lat[p.origin] * ky;
+    const dist = (t: number) => Math.hypot(g!.lng[t] * kx - ox, g!.lat[t] * ky - oy);
+    let n = 0, dsum = 0;
     for (let t = 0; t < res.n; t++) {
-      for (let i = res.off[t]; i < res.off[t + 1]; i++) if (res.dur[i] <= lim && res.cost[i] <= D) { n++; break; }
+      for (let i = res.off[t]; i < res.off[t + 1]; i++) if (res.dur[i] <= lim && res.cost[i] <= D) { n++; dsum += dist(t); break; }
     }
+    const R = n ? dsum / n : 0;
+    let land = 0;
+    for (let t = 0; t < res.n; t++) if (dist(t) <= R) land++;
     engine!.last = null; // free memory between origins
-    postMessage({ type: 'simres', job: msg.job, origin: msg.origin, km2: n * 0.0150475, ms: res.ms });
+    const A = 0.0150475;
+    postMessage({ type: 'simres', job: msg.job, origin: msg.origin, km2: n * A, landKm2: land * A, radKm: R, ms: res.ms });
   } else if (msg.type === 'explain') {
     const ex = engine!.explain(msg.tile, msg.idx);
     const alt = msg.alts ? (msg.alts as number[]).map((i) => engine!.explain(msg.tile, i)) : [];
