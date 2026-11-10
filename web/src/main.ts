@@ -11,6 +11,9 @@ import { K_CLASSIC, K_EBIKE, K_TAXI, K_TRANSIT, K_UBER, K_WALK } from './types';
 import { setupWhatif } from './whatif';
 import { setupAbout } from './about';
 import { setupSim } from './sim';
+import { inject } from '@vercel/analytics';
+
+inject();   // Vercel Web Analytics (page views; no-op locally in dev)
 
 // ------------------------------------------------------------------ cost bands (sequential: pale -> dark)
 const BANDS = [
