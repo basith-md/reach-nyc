@@ -8,8 +8,9 @@ import type { Params } from './types';
 
 interface Ctx {
   params: Params;                       // live UI settings (snapshotted at Run)
-  getBudget: () => { mode: 'time' | 'money'; T: number; M: number; moneyH: number };   // live header budget (+ money mode's trip-length cap)
+  getBudget: () => { mode: 'time' | 'money'; T: number; M: number; moneyH: number; timeCap: number };   // live header budget + the other-axis caps
   setMoneyH: (min: number) => void;     // change money mode's trip-length cap (map + simulation)
+  setTimeCap: (usd: number) => void;    // change time mode's spending cap, Infinity = any price (map + simulation)
   map: MLMap;
   h3ids: () => string[];
   setSim: (active: boolean, layers: any[]) => void;
@@ -44,6 +45,7 @@ export function setupSim(ctx: Ctx) {
     <div class="panel-body">
       <p class="fine" style="margin:0">Get a distribution map of the whole city. We drop pins everywhere, measure how much of NYC each spot can reach with your current settings, and colour the result so transit deserts (red) and well-connected areas (green) stand out.</p>
       <div class="row" id="simHRow" hidden><label for="simH">Trips up to<small>time limit in money mode (map too)</small></label><div class="unit"><input id="simH" type="number" min="5" max="120" step="5" value="60" /><em>min</em></div></div>
+      <div class="row" id="simCRow"><label for="simC">Spend up to<small>cost limit in time mode (map too); blank = any price</small></label><div class="unit"><em>$</em><input id="simC" type="number" min="0" max="100" step="0.25" placeholder="any" /></div></div>
       <div class="sim-res" role="radiogroup" aria-label="Resolution">
         ${(Object.keys(RES) as ResKey[]).map((k) => `<label><input type="radio" name="simRes" value="${k}" ${k === 'med' ? 'checked' : ''}/> <span>${RES[k].label}<small data-n="${k}">…</small></span></label>`).join('')}
       </div>
@@ -87,11 +89,12 @@ export function setupSim(ctx: Ctx) {
     });
     const b = ctx.getBudget();
     $('#simHRow').hidden = b.mode !== 'money';
+    $('#simCRow').hidden = b.mode !== 'time';
     const hEl = $('#simH') as HTMLInputElement;
     if (document.activeElement !== hEl) hEl.value = String(b.moneyH);
     const p = ctx.params, hh = String(Math.floor(p.depSec / 3600)).padStart(2, '0'), mm = String(Math.floor(p.depSec % 3600 / 60)).padStart(2, '0');
     const off = Object.entries(p.modes).filter(([, v]) => !v).map(([k]) => k);
-    $('#simUses').textContent = `Uses: ${b.mode === 'time' ? `${b.T} min, any price` : `$${b.M.toFixed(2)}, trips up to ${b.moneyH} min`} · ${({ wkd: 'Weekday', sat: 'Saturday', sun: 'Sunday' })[p.day]} ${hh}:${mm} · ${p.tripsPerWeek} trips/wk` +
+    $('#simUses').textContent = `Uses: ${b.mode === 'time' ? `${b.T} min, ${isFinite(b.timeCap) ? `up to $${b.timeCap.toFixed(2)}` : 'any price'}` : `$${b.M.toFixed(2)}, trips up to ${b.moneyH} min`} · ${({ wkd: 'Weekday', sat: 'Saturday', sun: 'Sunday' })[p.day]} ${hh}:${mm} · ${p.tripsPerWeek} trip${p.tripsPerWeek === 1 ? "" : "s"}/wk` +
       `${off.length ? ` · off: ${off.join(', ')}` : ''}${Object.keys(p.fareOverrides ?? {}).length ? ' · hypothetical fares' : ''}`;
   }
   panel.addEventListener('change', refreshInfo);
@@ -140,6 +143,11 @@ export function setupSim(ctx: Ctx) {
   $('#simRun').addEventListener('click', run);
   $('#simCancel').addEventListener('click', () => { cancelled = true; stop(); setStatus('Cancelled.'); ui('idle'); });
   $('#simH').addEventListener('change', (e) => { ctx.setMoneyH(+(e.target as HTMLInputElement).value || 60); refreshInfo(); });
+  $('#simC').addEventListener('change', (e) => {
+    const v = (e.target as HTMLInputElement).value.trim();
+    ctx.setTimeCap(v === '' ? Infinity : Math.max(0, +v || 0));
+    refreshInfo();
+  });
   $('#simPng').addEventListener('click', downloadPng);
   $('#simCsv').addEventListener('click', downloadCsv);
 
@@ -157,10 +165,10 @@ export function setupSim(ctx: Ctx) {
     await llReady;
     const resKey = (panel.querySelector<HTMLInputElement>('input[name=simRes]:checked')!.value) as ResKey;
     refreshInfo();
-    // same rule as the map's right-hand box: time mode = within T min at any price; money mode = for <= $M, trips up to moneyH min
+    // same rule as the map's right-hand box: time mode = within T min, up to the optional $ cap; money mode = for <= $M, trips up to moneyH min
     const b = ctx.getBudget();
     const T = b.mode === 'time' ? b.T : b.moneyH;
-    const D = b.mode === 'time' ? Infinity : b.M;
+    const D = b.mode === 'time' ? b.timeCap : b.M;
     const snap: Params = structuredClone(ctx.params);      // every UI setting, frozen for this run
     snap.horizonMin = Math.max(T, 15);
     snap.maxCost = D;                                      // only area within $D counts, so prune pricier journeys
@@ -258,7 +266,7 @@ export function setupSim(ctx: Ctx) {
     const r = result!, p = r.snap, hh = String(Math.floor(p.depSec / 3600)).padStart(2, '0'), mm = String(Math.floor(p.depSec % 3600 / 60)).padStart(2, '0');
     return {
       main: `Area reachable (km²) · ${rule(r)}`,
-      sub: `${({ wkd: 'Weekday', sat: 'Saturday', sun: 'Sunday' })[p.day]} ${hh}:${mm} · ${p.tripsPerWeek} trips/week · ${r.origins.length} points (${RES[r.res].label})` +
+      sub: `${({ wkd: 'Weekday', sat: 'Saturday', sun: 'Sunday' })[p.day]} ${hh}:${mm} · ${p.tripsPerWeek} trip${p.tripsPerWeek === 1 ? "" : "s"}/week · ${r.origins.length} points (${RES[r.res].label})` +
         `${Object.keys(p.fareOverrides ?? {}).length ? ' · hypothetical fares' : ''}`,
     };
   }
