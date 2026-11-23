@@ -380,6 +380,8 @@ function onHover(info: any) {
     for (let i = off[t]; i < off[t + 1]; i++) if (kind[i] === k && (bi < 0 || cost[i] < cost[bi])) bi = i;
     if (bi >= 0) alts.push(bi - off[t]);
   }
+  // walking, if it fits the time limit: zero-carbon candidate for "Greenest"
+  for (let i = off[t]; i < off[t + 1]; i++) if (kind[i] === K_WALK && dur[i] <= lim() * 60) { alts.push(i - off[t]); break; }
   if (budgetMode === 'money') {
     // money mode: also the cheapest option within the trip-length limit (always the last alt)
     let ci = -1;
@@ -407,52 +409,94 @@ function legHTML(l: Leg) {
     <span class="lt">${label}${l.cost ? ` · <b>${fmt$(l.cost)}</b>` : ''}${sub ? `<small>${sub}</small>` : ''}${l.note && l.from ? `<small>${l.note}</small>` : ''}</span>
     <span class="lm">${fmtMin(l.secs)}</span></li>`;
 }
-type CarInfo = { kind: number; dur: number; cost: number; n: number; observed: boolean; miles: number };
+type CarInfo = { kind: number; dur: number; cost: number; n: number; observed: boolean; miles: number; co2: number };
+type Option = { kind: number; dur: number; cost: number; co2: number };
+/** grams CO2e -> "0 g", "340 g", "1.2 kg" */
+const fmtCO2 = (g: number) => (g < 1 ? '0 g' : g < 1000 ? `${Math.round(g / 10) * 10 || Math.round(g)} g` : `${(g / 1000).toFixed(1)} kg`) + ' CO₂';
+/** Lowest-carbon option among those shown that fits the current limits (time + threshold, or budget + longest trip).
+ *  Ties (within 0.5 g) go to the earlier option, i.e. the headline route, then Fastest, so the badge lands on what's already shown. */
+function greenest(opts: (Option | null | undefined)[]): Option | null {
+  const capS = lim() * 60, capC = capNow() + 1e-9;
+  let best: Option | null = null;
+  for (const o of opts) if (o && o.dur <= capS && o.cost <= capC && (!best || o.co2 < best.co2 - 0.5)) best = o;
+  return best;
+}
+/** Car baseline for "% vs car": the Uber/Lyft estimate for the same trip (taxi if ride-hail is off). */
+const carBase = (cars: CarInfo[]) => (cars.find((c) => c.kind === K_UBER) ?? cars[0])?.co2 ?? 0;
+/** " · −86% vs car" (empty for car options or when there is no car baseline) */
+const vsCar = (g: number, base: number, kind: number) => {
+  if (!(base > 0) || kind === K_UBER || kind === K_TAXI) return '';
+  const d = Math.round((g / base - 1) * 100);
+  return ` <small class="vs">${d <= 0 ? '−' : '+'}${Math.abs(d)}% vs car</small>`;
+};
+const co2Txt = (o: Option, base: number) => `${fmtCO2(o.co2)}${vsCar(o.co2, base, o.kind)}`;
+const greenRow = (g: Option | null, base: number) => g
+  ? `<div class="green"><span><i></i>Greenest · ${KIND_NAME[g.kind]}</span><b>${co2Txt(g, base)} · ${fmtMin(g.dur)} · ${fmt$(g.cost)}</b></div>` : '';
+/** Same route? (an option can arrive twice, e.g. as "cheapest" and as the best of its kind) */
+const sameOpt = (a?: Option | null, b?: Option | null) => !!a && !!b && a.kind === b.kind &&
+  Math.abs(a.co2 - b.co2) <= 0.5 && Math.abs(a.dur - b.dur) < 60 && Math.abs(a.cost - b.cost) < 0.01;
+const isExplain = (o: Option | null): o is Explain => !!o && 'legs' in o;
+/** A route section with legs. lead = the big number; a green outline + badge marks the greenest option. */
+function secHTML(lab: string, o: Explain, lead: 'cost' | 'time' | 'co2', base: number, isGreen: boolean) {
+  const big = lead === 'cost' ? fmt$(o.cost) : lead === 'time' ? fmtMin(o.dur) : fmtCO2(o.co2);
+  const rest = lead === 'cost' ? [fmtMin(o.dur), KIND_NAME[o.kind], co2Txt(o, base)]
+    : lead === 'time' ? [fmt$(o.cost), KIND_NAME[o.kind], co2Txt(o, base)]
+    : [`${fmtMin(o.dur)} · ${fmt$(o.cost)}`, KIND_NAME[o.kind], vsCar(o.co2, base, o.kind).trim()].filter(Boolean);
+  return `<div class="sec${isGreen ? ' is-green' : ''}"><div class="lab">${lab}${isGreen && lab !== 'Greenest' ? ' <span class="gbadge">Greenest</span>' : ''}</div>
+    <div class="big"><b>${big}</b><span>${rest.join(' · ')}</span></div>
+    <ul class="legs">${o.legs.filter((l) => l.secs >= 30 || l.mode !== 'walk').map(legHTML).join('')}</ul></div>`;
+}
+/** Where the greenest option goes: onto the headline section, onto Fastest, as its own section, or (a car) as a row. */
+function greenPlacement(green: Option | null, head: Explain, second: Explain | null) {
+  const onHead = sameOpt(green, head), onSecond = !onHead && !!second && sameOpt(green, second);
+  const ownSec = !onHead && !onSecond && isExplain(green) ? green : null;
+  const row = !onHead && !onSecond && green && !isExplain(green) ? green : null;
+  return { onHead, onSecond, ownSec, row };
+}
 function renderTip(ex: Explain | null, alts: (Explain | null)[], cars: CarInfo[] = []) {
   if (!ex || hoverTile !== ex.tile) return;
   if (budgetMode === 'money') return renderMoneyTip(ex, alts, cars);
-  const fastest = alts[0];
+  const fastest = alts[0] && alts[0].dur < ex.dur - 59 ? alts[0] : null;   // only shown when meaningfully faster
+  const green = greenest([ex, fastest, ...alts, ...cars]), base = carBase(cars);
+  const gp = greenPlacement(green, ex, fastest);
   const seen = new Set<number>([ex.kind, K_UBER, K_TAXI]);
   if (fastest) seen.add(fastest.kind);
-  const others: { kind: number; dur: number; cost: number; note?: string }[] = [
-    ...cars.map((c) => ({ ...c, note: c.observed ? `${c.n.toLocaleString()} real trips` : 'estimate' })),
-    ...(alts.slice(1).filter((o) => o && !seen.has(o.kind)) as Explain[]),
-  ];
+  const others: (Option & { note?: string })[] = [
+    ...cars.map((c) => ({ ...c, note: c.observed ? undefined : 'estimate' })),
+    ...(alts.slice(1).filter((o) => o && !seen.has(o.kind) && !sameOpt(o, gp.ownSec)) as Explain[]),
+  ].filter((o) => !sameOpt(o, gp.row));
   tip.innerHTML = `
     ${Object.keys(params.fareOverrides ?? {}).length ? '<span class="hypo">Hypothetical fares</span>' : ''}
     <div class="zone">${ex.zone || 'Destination'}</div>
-    <div class="sec"><div class="lab">Cheapest within ${T} min</div>
-      <div class="big"><b>${fmt$(ex.cost)}</b><span>${fmtMin(ex.dur)} · ${KIND_NAME[ex.kind]}</span></div>
-      <ul class="legs">${ex.legs.filter((l) => l.secs >= 30 || l.mode !== 'walk').map(legHTML).join('')}</ul>
-    </div>
-    ${fastest && fastest.dur < ex.dur - 59 ? `<div class="sec"><div class="lab">Fastest</div>
-      <div class="big"><b>${fmtMin(fastest.dur)}</b><span>${fmt$(fastest.cost)} · ${KIND_NAME[fastest.kind]}</span></div>
-      <ul class="legs">${fastest.legs.filter((l) => l.secs >= 30 || l.mode !== 'walk').map(legHTML).join('')}</ul></div>` : ''}
-    ${others.length ? `<div class="sec alts"><div class="lab">Other ways</div>${others
-      .map((o) => `<div><span>${KIND_NAME[o.kind]}${o.note ? ` <small style="color:var(--muted)">${o.note}</small>` : ''}${o.dur > T * 60 ? ` <small style="color:#A51C30">over ${T} min</small>` : ''}</span><b>${fmt$(o.cost)} · ${fmtMin(o.dur)}</b></div>`).join('')}</div>` : ''}`;
+    ${secHTML(`Cheapest within ${T} min`, ex, 'cost', base, gp.onHead)}
+    ${fastest ? secHTML('Fastest', fastest, 'time', base, gp.onSecond) : ''}
+    ${gp.ownSec ? secHTML('Greenest', gp.ownSec, 'co2', base, true) : ''}
+    <div class="sec alts"><div class="lab">Other ways</div>${greenRow(gp.row, base)}${others
+      .map((o) => `<div><span>${KIND_NAME[o.kind]}${o.note ? ` <small style="color:var(--muted)">${o.note}</small>` : ''}${o.dur > T * 60 ? ` <small style="color:#A51C30">over ${T} min</small>` : ''}</span><b>${fmt$(o.cost)} · ${fmtMin(o.dur)} · ${fmtCO2(o.co2)}</b></div>`).join('')}</div>`;
   tip.hidden = false;
   positionTip();
 }
 /** Money mode: headline = fastest trip within budget; then one-line comparisons (cheapest, fastest at any price, bikes, cars). */
 function renderMoneyTip(ex: Explain, alts: (Explain | null)[], cars: CarInfo[]) {
   const cheapest = alts[alts.length - 1], fastest = alts[0];
-  const rows: { label: string; dur: number; cost: number; note?: string }[] = [];
-  if (cheapest && cheapest.cost < ex.cost - 0.004) rows.push({ label: `Cheapest · ${KIND_NAME[cheapest.kind]}`, dur: cheapest.dur, cost: cheapest.cost });
-  if (fastest && fastest.dur < ex.dur - 59) rows.push({ label: `Fastest · ${KIND_NAME[fastest.kind]}`, dur: fastest.dur, cost: fastest.cost });
+  const rows: { label: string; kind: number; dur: number; cost: number; co2: number; note?: string }[] = [];
+  if (cheapest && cheapest.cost < ex.cost - 0.004) rows.push({ kind: cheapest.kind, label: `Cheapest · ${KIND_NAME[cheapest.kind]}`, dur: cheapest.dur, cost: cheapest.cost, co2: cheapest.co2 });
+  if (fastest && fastest.dur < ex.dur - 59) rows.push({ kind: fastest.kind, label: `Fastest · ${KIND_NAME[fastest.kind]}`, dur: fastest.dur, cost: fastest.cost, co2: fastest.co2 });
   const shown = new Set<number>([ex.kind, K_UBER, K_TAXI]);
-  for (const a of alts.slice(1, -1)) if (a && !shown.has(a.kind)) { shown.add(a.kind); rows.push({ label: KIND_NAME[a.kind], dur: a.dur, cost: a.cost }); }
-  for (const c of cars) rows.push({ label: KIND_NAME[c.kind], dur: c.dur, cost: c.cost, note: c.observed ? `${c.n.toLocaleString()} real trips` : 'estimate' });
+  for (const a of alts.slice(1, -1)) if (a && !shown.has(a.kind)) { shown.add(a.kind); rows.push({ kind: a.kind, label: KIND_NAME[a.kind], dur: a.dur, cost: a.cost, co2: a.co2 }); }
+  for (const c of cars) rows.push({ kind: c.kind, label: KIND_NAME[c.kind], dur: c.dur, cost: c.cost, co2: c.co2, note: c.observed ? undefined : 'estimate' });
+  const green = greenest([ex, ...alts, ...cars]), base = carBase(cars);
+  const gp = greenPlacement(green, ex, null);
+  const shownRows = rows.filter((o) => !sameOpt(o, gp.ownSec) && !sameOpt(o, gp.row));
   tip.innerHTML = `
     ${Object.keys(params.fareOverrides ?? {}).length ? '<span class="hypo">Hypothetical fares</span>' : ''}
     <div class="zone">${ex.zone || 'Destination'}</div>
-    <div class="sec"><div class="lab">Fastest for $${M.toFixed(2)} or less</div>
-      <div class="big"><b>${fmtMin(ex.dur)}</b><span>${fmt$(ex.cost)} · ${KIND_NAME[ex.kind]}</span></div>
-      <ul class="legs">${ex.legs.filter((l) => l.secs >= 30 || l.mode !== 'walk').map(legHTML).join('')}</ul>
-    </div>
-    ${rows.length ? `<div class="sec alts"><div class="lab">Compare</div>${rows.map((o) => {
+    ${secHTML(`Fastest for $${M.toFixed(2)} or less`, ex, 'time', base, gp.onHead)}
+    ${gp.ownSec ? secHTML('Greenest', gp.ownSec, 'co2', base, true) : ''}
+    <div class="sec alts"><div class="lab">Compare</div>${greenRow(gp.row, base)}${shownRows.map((o) => {
       const over = o.cost > M + 1e-9;
-      return `<div><span>${o.label}${o.note ? ` <small style="color:var(--muted)">${o.note}</small>` : ''}${over ? ` <small style="color:#A51C30">over budget</small>` : ''}</span><b>${fmtMin(o.dur)} · ${fmt$(o.cost)}</b></div>`;
-    }).join('')}</div>` : ''}`;
+      return `<div><span>${o.label}${o.note ? ` <small style="color:var(--muted)">${o.note}</small>` : ''}${over ? ` <small style="color:#A51C30">over budget</small>` : ''}</span><b>${fmtMin(o.dur)} · ${fmt$(o.cost)} · ${fmtCO2(o.co2)}</b></div>`;
+    }).join('')}</div>`;
   tip.hidden = false;
   positionTip();
 }
@@ -529,8 +573,6 @@ modesEl.querySelectorAll<HTMLButtonElement>('.chip').forEach((b) => b.addEventLi
   runQuery();
 }));
 
-// keep K_* imports referenced for tree-shaking clarity
-void K_WALK;
 
 setupWhatif(params, () => runQuery());
 setupAbout();
@@ -576,7 +618,7 @@ const bubble = document.createElement('aside');
 bubble.id = 'tipBubble'; bubble.setAttribute('role', 'status');
 bubble.innerHTML = `<button type="button" class="tb-x" aria-label="Close">×</button>
   <b>Try this simulation</b>
-  <p>Where in NYC can you get furthest in <strong>20 minutes</strong> for <strong>under $5</strong>?</p>
+  <p>Where in NYC can you get furthest in <strong>25 minutes</strong> for <strong>under $5</strong>?</p>
   <button type="button" class="tb-go">Run it</button>`;
 document.body.appendChild(bubble);
 let bubbleTimer = 0;
@@ -588,7 +630,7 @@ bubble.addEventListener('mouseleave', armClose);
 bubble.querySelector('.tb-go')!.addEventListener('click', () => {
   closeBubble();
   if (budgetMode !== 'time') document.querySelector<HTMLButtonElement>('.budget-sw button[data-b=time]')!.click();
-  setT(20);
+  setT(25);
   timeCap = 5; syncThreshold(); sim.refresh(); refresh();
   const sp = document.getElementById('simPanel');
   if (sp?.classList.contains('collapsed')) sp.querySelector<HTMLButtonElement>('.panel-head')!.click();

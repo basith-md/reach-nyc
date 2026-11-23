@@ -44,6 +44,8 @@ export interface Leg {
   from?: string;
   to?: string;
   note?: string;
+  km?: number;           // distance travelled on this leg
+  co2?: number;          // grams CO2e for this leg (per passenger)
 }
 
 export interface Explain {
@@ -53,4 +55,5 @@ export interface Explain {
   cost: number;
   kind: number;
   legs: Leg[];
+  co2: number;           // grams CO2e for the whole trip (per passenger)
 }

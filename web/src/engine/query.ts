@@ -18,6 +18,35 @@ const DEP_TOL = 120;          // leaving up to 2 min earlier still counts as "as
 const XFER_PEN = 120;         // each extra boarding counts as 2 min when comparing routes (not added to reported time)
 
 // state bits
+/** Grams CO2e per passenger-km (operational, well-to-wheel, average occupancy). Estimates; see "How it works". */
+export const CO2_G_PER_PKM: Record<string, number> = {
+  walk: 0, wait: 0,
+  classic: 3,               // share of the vans that rebalance bikes between docks
+  ebike: 8,                 // charging on the NYC grid + rebalancing / battery-swap vans
+  subway: 45, path: 45,     // electric rail, NYC grid, average load
+  rail: 60,                 // LIRR / Metro-North (electric + diesel)
+  express: 90, bus: 110,    // diesel / hybrid buses, average load
+  free: 100,                // Staten Island Ferry (large, full boats)
+  ferry: 250,               // NYC Ferry (small, fast diesel boats)
+  // taxi / Uber: see carCO2 (depends on traffic speed and hour of day)
+};
+
+/**
+ * Car CO2e (grams, per passenger) for one trip at a given hour.
+ *  - traffic: g per vehicle-km from the trip's average speed (stop-and-go burns more per km):
+ *      1800/v + 110 + 0.005 v^2 (v in km/h), scaled for the fleet (yellow cabs mostly hybrid: x0.75; ride-hail x0.85)
+ *  - empty miles: share of driving with no passenger by hour (highest late at night), ride-hail +5 points
+ *      per-passenger g/km = vehicle g/km / (1 - empty share)
+ */
+export function carCO2(which: 'hv' | 'taxi', miles: number, mins: number, hour: number) {
+  const km = miles * 1.609, v = Math.max(5, (km / Math.max(mins, 1)) * 60);
+  const perKm = (1800 / v + 110 + 0.005 * v * v) * (which === 'taxi' ? 0.75 : 0.85);
+  const h = ((hour % 24) + 24) % 24;
+  const empty = (h < 6 ? 0.5 : h < 10 ? 0.35 : h < 16 ? 0.4 : h < 20 ? 0.35 : 0.45) + (which === 'hv' ? 0.05 : 0);
+  return km * perKm / (1 - empty);
+}
+const BIKE_MPS = { classic: 3.9, ebike: 5.1 };   // typical Citi Bike riding speeds, for leg distances
+
 const MTA_MASK = 3, IN_SYS = 4, FERRY_X = 8, BIKE_PAID = 16;
 
 type LegRec =
@@ -523,10 +552,10 @@ export class Engine {
   /** Uber and taxi to a tile, always (even when another option is better), for the hover card. */
   carsFor(tile: number) {
     const L = this.last; if (!L) return [];
-    const out: { kind: number; dur: number; cost: number; n: number; observed: boolean; miles: number }[] = [];
+    const out: { kind: number; dur: number; cost: number; n: number; observed: boolean; miles: number; co2: number }[] = [];
     const hb = this.hourbin(L.p);
-    if (L.p.modes.uber) { const c = this.car(L.p, 'hv', L.p.origin, tile, hb); if (c) out.push({ kind: K_UBER, dur: c.dur, cost: c.price, n: c.n, observed: c.observed, miles: c.miles }); }
-    if (L.p.modes.taxi) { const c = this.car(L.p, 'taxi', L.p.origin, tile, hb); if (c) out.push({ kind: K_TAXI, dur: c.dur, cost: c.price, n: c.n, observed: c.observed, miles: c.miles }); }
+    if (L.p.modes.uber) { const c = this.car(L.p, 'hv', L.p.origin, tile, hb); if (c) out.push({ kind: K_UBER, dur: c.dur, cost: c.price, n: c.n, observed: c.observed, miles: c.miles, co2: carCO2('hv', c.miles, c.mins, hb) }); }
+    if (L.p.modes.taxi) { const c = this.car(L.p, 'taxi', L.p.origin, tile, hb); if (c) out.push({ kind: K_TAXI, dur: c.dur, cost: c.price, n: c.n, observed: c.observed, miles: c.miles, co2: carCO2('taxi', c.miles, c.mins, hb) }); }
     return out;
   }
 
@@ -541,6 +570,7 @@ export class Engine {
     const bikeLegs = (b: any): Leg[] => [
       { mode: 'walk', name: 'Walk to dock', color: '', secs: b.w1, to: g.dockName[b.d1] },
       { mode: b.type, name: b.type === 'ebike' ? 'Citi Bike e-bike' : 'Citi Bike classic', color: '', secs: b.ride + DOCK_S + (b.swaps ?? 0) * SWAP_S, cost: b.fee, from: g.dockName[b.d1], to: g.dockName[b.d2],
+        km: b.ride * BIKE_MPS[b.type as 'classic' | 'ebike'] / 1000,
         note: [b.swaps ? `${b.swaps + 1} rides: dock and take a fresh bike ${b.swaps === 1 ? 'once' : b.swaps + ' times'} to reset the included minutes` : '',
           hypo ? `real price $${this.bikeFee(real, this.fares(real), b.type, b.ride, false, 0)[0].toFixed(2)}` : ''].filter(Boolean).join(' · ') || undefined },
       { mode: 'walk', name: 'Walk', color: '', secs: b.w2 },
@@ -555,7 +585,7 @@ export class Engine {
       if (c.tolls > 0) parts.push(`$${c.tolls.toFixed(2)} tolls`);
       if (c.tip > 0) parts.push(`$${c.tip.toFixed(2)} tip`);
       legs.push({ mode: o.kind === K_UBER ? 'uber' : 'taxi', name: o.kind === K_UBER ? 'Uber / Lyft' : 'Yellow / green taxi', color: '',
-        secs: c.mins * 60, cost: c.price, note: `${c.miles.toFixed(1)} mi · ${parts.join(' + ')} · ${c.observed ? `based on ${c.n.toLocaleString()} trips` : 'estimate (few trips on this route)'}` });
+        secs: c.mins * 60, cost: c.price, km: c.miles * 1.609, co2: carCO2(o.kind === K_UBER ? 'hv' : 'taxi', c.miles, c.mins, this.hourbin(p)), note: `${c.miles.toFixed(1)} mi · ${parts.join(' + ')}${c.observed ? '' : ' · estimate (few trips on this route)'}` });
       if (c.walkB >= 60) legs.push({ mode: 'walk', name: 'Walk in (cars can\'t drive here)', color: '', secs: c.walkB });
     } else if (o.kind === K_TRANSIT) {
       const chain: Label[] = [];
@@ -573,7 +603,13 @@ export class Engine {
           const firstBoard = !l.parent?.boarded;
           if (prevArr >= 0 && tdep - prevArr > 60 && (!firstBoard || p.includeFirstWait)) legs.push({ mode: 'wait', name: 'Wait', color: '', secs: tdep - prevArr });
           const r = g.routes[tt.patRoute[lg.p]];
-          legs.push({ mode: r.mode, name: r.name, color: r.color, secs: tarr - tdep, cost: l.cost - (l.parent?.cost ?? 0),
+          // ride distance: straight lines between consecutive stops along the route (follows the line's shape)
+          let km = 0;
+          for (let k = lg.from; k < lg.to; k++) {
+            const a = g.stopTile[tt.pstops[tt.patStart[lg.p] + k]], b = g.stopTile[tt.pstops[tt.patStart[lg.p] + k + 1]];
+            km += hav(g.lat[a], g.lng[a], g.lat[b], g.lng[b]) / 1000;
+          }
+          legs.push({ mode: r.mode, name: r.name, color: r.color, secs: tarr - tdep, cost: l.cost - (l.parent?.cost ?? 0), km,
             from: g.stopName[tt.pstops[tt.patStart[lg.p] + lg.from]], to: g.stopName[tt.pstops[tt.patStart[lg.p] + lg.to]], note: r.long });
         }
         prevArr = l.arr;
@@ -582,6 +618,8 @@ export class Engine {
       if (eg.k === 'walk') legs.push({ mode: 'walk', name: 'Walk', color: '', secs: eg.secs });
       else legs.push(...bikeLegs(eg));
     }
-    return { tile, zone, dur: o.dur, cost: o.cost, kind: o.kind, legs };
+    let co2 = 0;
+    for (const lg of legs) { lg.co2 ??= (lg.km ?? 0) * (CO2_G_PER_PKM[lg.mode] ?? 0); co2 += lg.co2; }   // car legs set their own
+    return { tile, zone, dur: o.dur, cost: o.cost, kind: o.kind, legs, co2 };
   }
 }

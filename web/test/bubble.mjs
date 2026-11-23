@@ -1,4 +1,4 @@
-// The tip bubble appears after load; "Run it" applies 20 min / $5 and runs the simulation.
+// The tip bubble appears after load; "Run it" applies 25 min / $5 and runs the simulation.
 import puppeteer from 'puppeteer-core';
 const out = process.argv[2];
 const browser = await puppeteer.launch({ executablePath: 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
